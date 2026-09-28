@@ -1376,6 +1376,13 @@ impl Worker {
         // Lines the text detector found outside every layout region (#429).
         let mut det_cells: Vec<pdfium_backend::TextCell> = Vec::new();
         if ocred {
+            // Region-scoped OCR recognizes each region's crop, so two regular
+            // regions over the same ink would read it twice — a low-score
+            // paragraph box over the high-score line boxes `greedy` keeps.
+            // Collapse such groups to one region first; a digital
+            // page resolves the same overlap through cell ownership in
+            // `fit_regions_to_cells` and needs nothing here.
+            assemble::merge_overlapping_regulars(&mut regions);
             // `None` = `skip_ocr` or a missing model (#244): the page keeps
             // its layout regions (and TableFormer structure below) with no
             // recognized text, instead of failing the conversion.

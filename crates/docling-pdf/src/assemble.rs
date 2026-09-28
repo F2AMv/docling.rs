@@ -183,6 +183,147 @@ pub(crate) fn dedup_pictures(regions: &mut Vec<Region>) {
     regions.retain(|_| !keep_iter.next().expect("aligned"));
 }
 
+/// docling's `_remove_overlapping_clusters("regular")` for what [`greedy`]
+/// leaves standing, run on OCR'd pages before the region-scoped OCR (found
+/// with #471's synthetic scan: every line of the page came out twice).
+///
+/// `greedy` keeps regions by descending score and drops a candidate mostly
+/// inside an already-kept one — so a *lower*-score block that contains
+/// several higher-score line boxes (RT-DETR's favourite reading of a sparse
+/// scanned page: every line, plus the paragraph) survives alongside them.
+/// On a digital page that is harmless: [`fit_regions_to_cells`] hands each
+/// text cell to one owner and drops the regions left empty. On a scanned
+/// page the cells don't exist yet — they come from OCR of *each* region's
+/// crop — so the block and its lines were each recognized, and the block,
+/// which then owned both cell sets, read every line twice.
+///
+/// Upstream never has this problem because its OCR runs over the bitmap
+/// before layout postprocessing and each cell is assigned once; the
+/// postprocessor's regular pass then groups clusters that overlap (IoU > 0.8,
+/// or either > 80 % contained in the other) with a union-find, keeps one
+/// survivor per group via `_should_prefer_cluster` /
+/// `_select_best_cluster_from_group` (`area_threshold` 1.3, `conf_threshold`
+/// 0.05; a LIST_ITEM beats a same-sized TEXT, a CODE box beats what it
+/// contains) and merges the losers' cells into it, whose box is then fitted
+/// to those cells. The equivalent for region-scoped OCR: one survivor per
+/// group, keeping its label and score, with the group's **union** box so the
+/// single crop still covers every merged line. Pictures and wrappers are not
+/// regulars and are left alone ([`dedup_pictures`], [`resolve`]).
+pub(crate) fn merge_overlapping_regulars(regions: &mut Vec<Region>) {
+    let idx: Vec<usize> = (0..regions.len())
+        .filter(|&i| regions[i].label != "picture" && !is_wrapper(regions[i].label))
+        .collect();
+    if idx.len() < 2 {
+        return;
+    }
+    let mut parent: Vec<usize> = (0..idx.len()).collect();
+    fn find(parent: &mut [usize], i: usize) -> usize {
+        let mut root = i;
+        while parent[root] != root {
+            root = parent[root];
+        }
+        let mut cur = i;
+        while parent[cur] != root {
+            let next = parent[cur];
+            parent[cur] = root;
+            cur = next;
+        }
+        root
+    }
+    for a in 0..idx.len() {
+        for b in (a + 1)..idx.len() {
+            let (ra, rb) = (&regions[idx[a]], &regions[idx[b]]);
+            let i = inter(ra, rb.l, rb.t, rb.r, rb.b);
+            let aa = area(ra.l, ra.t, ra.r, ra.b).max(f32::EPSILON);
+            let ba = area(rb.l, rb.t, rb.r, rb.b).max(f32::EPSILON);
+            if i / (aa + ba - i).max(f32::EPSILON) > 0.8 || i / aa > 0.8 || i / ba > 0.8 {
+                let (pa, pb) = (find(&mut parent, a), find(&mut parent, b));
+                if pa != pb {
+                    parent[pa] = pb;
+                }
+            }
+        }
+    }
+    let mut groups: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for i in 0..idx.len() {
+        let root = find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+    const AREA_THRESHOLD: f32 = 1.3;
+    const CONF_THRESHOLD: f32 = 0.05;
+    let area_of = |i: usize| {
+        let r = &regions[idx[i]];
+        area(r.l, r.t, r.r, r.b).max(f32::EPSILON)
+    };
+    // `_should_prefer_cluster(candidate, other)` with the regular params.
+    let prefer = |cand: usize, other: usize| -> bool {
+        let (c, o) = (&regions[idx[cand]], &regions[idx[other]]);
+        let area_ratio = area_of(cand) / area_of(other);
+        if c.label == "list_item" && o.label == "text" && (1.0 - area_ratio).abs() < 0.2 {
+            return true;
+        }
+        if c.label == "code" && inter(o, c.l, c.t, c.r, c.b) / area_of(other) > 0.8 {
+            return true;
+        }
+        !(area_ratio <= AREA_THRESHOLD && o.score - c.score > CONF_THRESHOLD)
+    };
+    let mut drop = vec![false; regions.len()];
+    let mut unions: Vec<(usize, (f32, f32, f32, f32))> = Vec::new();
+    for group in groups.values() {
+        if group.len() < 2 {
+            continue;
+        }
+        let mut best: Option<usize> = None;
+        for &cand in group {
+            if group
+                .iter()
+                .all(|&other| other == cand || prefer(cand, other))
+            {
+                best = Some(match best {
+                    None => cand,
+                    Some(cur)
+                        if area_of(cand) > area_of(cur)
+                            && regions[idx[cur]].score - regions[idx[cand]].score
+                                <= CONF_THRESHOLD =>
+                    {
+                        cand
+                    }
+                    Some(cur) => cur,
+                });
+            }
+        }
+        // docling falls back to the group's first cluster; the highest score
+        // is the deterministic equivalent for a set with no insertion order.
+        let keep = best.unwrap_or_else(|| {
+            *group
+                .iter()
+                .max_by(|&&a, &&b| regions[idx[a]].score.total_cmp(&regions[idx[b]].score))
+                .expect("non-empty group")
+        });
+        let mut u = (
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        );
+        for &i in group {
+            let r = &regions[idx[i]];
+            u = (u.0.min(r.l), u.1.min(r.t), u.2.max(r.r), u.3.max(r.b));
+            if i != keep {
+                drop[idx[i]] = true;
+            }
+        }
+        unions.push((idx[keep], u));
+    }
+    for (i, (l, t, r, b)) in unions {
+        let k = &mut regions[i];
+        (k.l, k.t, k.r, k.b) = (l, t, r, b);
+    }
+    let mut keep_iter = drop.into_iter();
+    regions.retain(|_| !keep_iter.next().expect("aligned"));
+}
+
 /// `intersection_over_union` of two regions.
 fn iou(a: &Region, b: &Region) -> f32 {
     let i = inter(a, b.l, b.t, b.r, b.b);
@@ -3050,7 +3191,7 @@ impl StreamAssembler {
 
 #[cfg(test)]
 mod tests {
-    use super::{cells_text, clean_text};
+    use super::{cells_text, clean_text, merge_overlapping_regulars};
 
     /// docling drops a picture covering > 90 % of the page (its labels then
     /// read out as text); a dominant-but-not-full figure and any other label
@@ -3557,6 +3698,94 @@ mod tests {
             r,
             b,
         }
+    }
+
+    /// OCR-path grouping (docling's `_remove_overlapping_clusters("regular")`):
+    /// the low-score paragraph box RT-DETR draws over its own high-score line
+    /// boxes collapses to one region — the group's union, with the survivor's
+    /// label and score — so region-scoped OCR reads each line once. Regions
+    /// that merely sit near each other, and specials, are untouched.
+    #[test]
+    fn merge_overlapping_regulars_collapses_a_block_over_its_lines() {
+        let mut regions = vec![
+            region("text", 0.84, 60.0, 186.0, 270.0, 198.0),
+            region("text", 0.80, 60.0, 160.0, 294.0, 172.0),
+            region("text", 0.79, 59.0, 107.0, 272.0, 119.0),
+            // The paragraph box, lower score, containing all three lines.
+            region("text", 0.52, 59.0, 107.0, 295.0, 200.0),
+            // Elsewhere on the page: stays as is.
+            region("section_header", 0.77, 60.0, 71.0, 253.0, 86.0),
+            // A picture the block overlaps is not a regular — never grouped.
+            region("picture", 0.9, 50.0, 100.0, 300.0, 210.0),
+        ];
+        merge_overlapping_regulars(&mut regions);
+        assert_eq!(regions.len(), 3, "{regions:?}");
+        let block = regions
+            .iter()
+            .find(|r| r.label == "text")
+            .expect("one text");
+        // docling keeps the largest passing candidate unless a rival is both
+        // comparable in size and > 0.05 more confident; the 16× larger block
+        // passes, and a smaller line never replaces a larger current best.
+        // Either way the survivor spans the whole group.
+        assert_eq!(
+            (block.l, block.t, block.r, block.b),
+            (59.0, 107.0, 295.0, 200.0)
+        );
+        assert!(regions.iter().any(|r| r.label == "section_header"));
+        assert!(regions.iter().any(|r| r.label == "picture"));
+    }
+
+    /// The pairwise rules, each in the arrangement where it decides the
+    /// outcome: docling seeds the survivor with the group's first passing
+    /// cluster and a later one replaces it only when larger *and* within
+    /// 0.05 confidence, so a rule that merely lets a cluster pass matters
+    /// exactly when that cluster comes first — a same-sized list item ahead
+    /// of a far more confident text box, a code box ahead of the text it
+    /// contains. Without the rule either would be rejected outright (similar
+    /// size, rival > 0.05 more confident) and the text box would win.
+    #[test]
+    fn merge_overlapping_regulars_follows_the_preference_rules() {
+        let mut regions = vec![
+            region("list_item", 0.6, 0.0, 0.0, 102.0, 20.0),
+            region("text", 0.9, 0.0, 0.0, 100.0, 20.0),
+        ];
+        merge_overlapping_regulars(&mut regions);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].label, "list_item");
+
+        let mut regions = vec![
+            region("code", 0.6, 0.0, 0.0, 100.0, 100.0),
+            region("text", 0.9, 2.0, 2.0, 98.0, 98.0),
+        ];
+        merge_overlapping_regulars(&mut regions);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].label, "code");
+
+        // No rule applies: a near-identical rival that is > 0.05 more
+        // confident rejects the candidate whatever the order.
+        for order in [[0.9, 0.6], [0.6, 0.9]] {
+            let mut regions = vec![
+                region("text", order[0], 0.0, 0.0, 100.0, 20.0),
+                region("text", order[1], 0.0, 0.0, 105.0, 21.0),
+            ];
+            merge_overlapping_regulars(&mut regions);
+            assert_eq!(regions.len(), 1);
+            assert_eq!(regions[0].score, 0.9, "the confident twin wins");
+            assert_eq!(
+                (regions[0].r, regions[0].b),
+                (105.0, 21.0),
+                "on the union box"
+            );
+        }
+
+        // Side by side (no containment, IoU 0): nothing to merge.
+        let mut regions = vec![
+            region("text", 0.9, 0.0, 0.0, 100.0, 20.0),
+            region("text", 0.9, 0.0, 22.0, 100.0, 42.0),
+        ];
+        merge_overlapping_regulars(&mut regions);
+        assert_eq!(regions.len(), 2);
     }
 
     fn region(label: &'static str, score: f32, l: f32, t: f32, r: f32, b: f32) -> Region {

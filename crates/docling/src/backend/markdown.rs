@@ -868,6 +868,37 @@ mod tests {
     use super::*;
     use crate::format::InputFormat;
 
+    /// docling#4318: the space around inline emphasis inside a table cell
+    /// belongs to the cell (`**C** Cadre` is `C Cadre`, not `CCadre`).
+    #[test]
+    fn table_cells_keep_the_space_around_inline_emphasis() {
+        let doc = convert(
+            "| H | I |\n|---|---|\n| **C** Cadre | x |\n| foo **bar** | y |\n| **A** **B** | z |\n| *italic* and **bold** | w |\n",
+        );
+        let json: serde_json::Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        let cells: Vec<String> = json["tables"][0]["data"]["table_cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["text"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            cells,
+            [
+                "H",
+                "I",
+                "C Cadre",
+                "x",
+                "foo bar",
+                "y",
+                "A B",
+                "z",
+                "italic and bold",
+                "w"
+            ]
+        );
+    }
+
     fn convert(md: &str) -> DoclingDocument {
         let src = SourceDocument::from_bytes("t", InputFormat::Md, md.as_bytes().to_vec());
         MarkdownBackend { strict: false }.convert(&src).unwrap()

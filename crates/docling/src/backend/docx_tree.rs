@@ -1512,10 +1512,18 @@ impl Walker {
 
         if p_style_id == "Title" {
             self.clear_parents_from(0);
+            // The parents stack is cleared here, so the list context goes
+            // with it (docling#4282) — the next list item opens fresh.
+            self.level_at_new_list = None;
             let te = self.add(None, self.layer, text_kind("title", &text, None, None));
             self.set_parent(0, Some(te));
             refs.push(te);
         } else if p_style_id.contains("Heading") {
+            // `_add_heading` clears the parents tail; a heading whose style
+            // carries `w:numPr` used to leave `level_at_new_list` pointing at
+            // a slot that no longer exists, and the next list item hung its
+            // group off the body root (docling#4282).
+            self.level_at_new_list = None;
             let is_numbered_style = numid
                 .as_deref()
                 .is_some_and(|n| Self::has_visible_numbering(n, ilevel.unwrap_or(0), ctx));

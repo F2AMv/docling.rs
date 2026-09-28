@@ -1090,8 +1090,10 @@ fn heading_label_level(label: &str) -> Option<u8> {
     };
     match split {
         Some((text, digits)) if text.trim().eq_ignore_ascii_case("heading") => {
-            let level = digits.parse::<u8>().unwrap_or(u8::MAX - 1).max(1);
-            Some(level.saturating_add(1))
+            // OOXML headings are 1–9: a custom "Heading 0" or "Heading 111"
+            // clamps into that range (docling#4319).
+            let level = digits.parse::<u8>().unwrap_or(u8::MAX).clamp(1, 9);
+            Some(level + 1)
         }
         Some(_) => None,
         // No digit split: level-less heading iff the label itself says
@@ -2801,8 +2803,11 @@ mod tests {
         assert_eq!(heading_label_level("heading 3"), Some(4));
         // <digits><text>, the rest ignored (upstream's `^(\d+)(\D+)` alt).
         assert_eq!(heading_label_level("2Heading"), Some(3));
-        // Custom "Heading 0" clamps to level 1 (md ##).
+        // Custom "Heading 0" clamps to level 1 (md ##), "Heading 111" to 9
+        // (docling#4319).
         assert_eq!(heading_label_level("Heading 0"), Some(2));
+        assert_eq!(heading_label_level("Heading 111"), Some(10));
+        assert_eq!(heading_label_level("Heading 99999"), Some(10));
         // A longer text part is not "heading": upstream's ("", 0) branch.
         assert_eq!(heading_label_level("My Heading 2"), None);
         // No digit split: heading only with a capital-H "Heading" in the raw

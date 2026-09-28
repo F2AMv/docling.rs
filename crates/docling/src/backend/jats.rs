@@ -1598,8 +1598,17 @@ fn parse_element_citation(node: XmlNode) -> String {
             .and_then(|c| c.text())
             .map(|t| t.replace('\n', " "))
             .map(|t| t.trim().to_string());
-        if let (Some(s), Some(g)) = (surname, given) {
-            names.push(format!("{s} {g}"));
+        // A partial name — only a surname, or only given names — is kept
+        // (docling#4272's `_parse_structured_name(order=("surname",
+        // "given-names"))`: the present parts, space-joined).
+        let name_str = [surname, given]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !name_str.is_empty() {
+            names.push(name_str);
         }
     }
     if let Some(etal) = node.descendants().find(|n| n.has_tag_name("etal")) {
@@ -1669,14 +1678,16 @@ fn parse_element_citation(node: XmlNode) -> String {
             .text()
             .map(|t| t.replace('\n', " ").trim().to_string())
             .unwrap_or_default();
-        if let Some(l) = node.children().find(|c| c.has_tag_name("lpage")) {
+        // An empty `<lpage/>` adds no dash (docling#4272).
+        if let Some(l) = node
+            .children()
+            .find(|c| c.has_tag_name("lpage"))
+            .and_then(|l| l.text())
+            .map(|t| t.replace('\n', " ").trim().to_string())
+            .filter(|l| !l.is_empty())
+        {
             p.push('\u{2013}');
-            p.push_str(
-                l.text()
-                    .map(|t| t.replace('\n', " "))
-                    .unwrap_or_default()
-                    .trim(),
-            );
+            p.push_str(&l);
         }
         p
     } else {

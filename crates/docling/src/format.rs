@@ -176,7 +176,8 @@ impl InputFormat {
             "docx" | "dotx" | "docm" | "dotm" => InputFormat::Docx,
             "pptx" | "potx" | "ppsx" | "pptm" | "potm" | "ppsm" => InputFormat::Pptx,
             "pdf" => InputFormat::Pdf,
-            "md" | "txt" | "text" | "qmd" | "rmd" => InputFormat::Md,
+            // `markdown`: docling#4306.
+            "md" | "markdown" | "txt" | "text" | "qmd" | "rmd" => InputFormat::Md,
             "html" | "htm" | "xhtml" => InputFormat::Html,
             "xml" | "nxml" => InputFormat::XmlJats,
             "dclg" => InputFormat::XmlDoclang,

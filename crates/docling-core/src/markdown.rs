@@ -464,7 +464,7 @@ fn render_list_run(items: &[Node], blocks: &mut Vec<String>, strict: bool) {
             first_in_list,
             text,
             level,
-            marker: _,
+            marker: orig_marker,
             location: _,
             dclx: _,
             href: _,
@@ -496,10 +496,18 @@ fn render_list_run(items: &[Node], blocks: &mut Vec<String>, strict: bool) {
         }
 
         let indent = "    ".repeat(level);
-        let marker = if *ordered {
-            format!("{number}.")
-        } else {
-            "-".to_string()
+        // docling-core's `case_already_valid`: a marker of digits and a dot
+        // prints verbatim — Python's `\d+\.` admits every Unicode decimal
+        // digit, so a DOCX `decimalFullWidth` marker (`１.`, docling#4336)
+        // is kept as it is rather than renumbered in ASCII.
+        let verbatim = orig_marker.as_deref().filter(|m| {
+            m.strip_suffix('.')
+                .is_some_and(|d| !d.is_empty() && d.chars().all(char::is_numeric))
+        });
+        let marker = match verbatim {
+            Some(m) if *ordered => m.to_string(),
+            _ if *ordered => format!("{number}."),
+            _ => "-".to_string(),
         };
         lines.push(format!("{indent}{marker} {}", list_item_text(text, strict)));
     }

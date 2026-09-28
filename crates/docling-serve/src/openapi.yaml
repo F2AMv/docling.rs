@@ -77,6 +77,7 @@ paths:
         - { $ref: "#/components/parameters/asr_lang" }
         - { $ref: "#/components/parameters/encoding" }
         - { $ref: "#/components/parameters/video_frames" }
+        - { $ref: "#/components/parameters/xbrl_taxonomy" }
         - { $ref: "#/components/parameters/chunker" }
         - { $ref: "#/components/parameters/chunk_tokenizer" }
         - { $ref: "#/components/parameters/chunk_max_tokens" }
@@ -122,6 +123,7 @@ paths:
                 asr_lang: { type: string, examples: ["auto", "en", "de"] }
                 encoding: { type: string, examples: ["shift_jis", "koi8-r", "windows-1251"] }
                 video_frames: { type: integer, minimum: 0 }
+                xbrl_taxonomy: { type: string }
                 chunker: { $ref: "#/components/schemas/Chunker" }
                 chunk_tokenizer: { type: string }
                 chunk_max_tokens: { type: integer, minimum: 1 }
@@ -598,6 +600,15 @@ components:
           type: integer
           minimum: 0
           description: Video — max frames sampled as pictures (0 = transcript only; needs ffmpeg on the server).
+        xbrl_taxonomy:
+          type: string
+          description: >
+            XBRL — server-local directory holding the instance's taxonomy (its
+            extension schema and linkbases at the paths the instance's schemaRef
+            names, plus taxonomy packages mapping the base taxonomies' URLs),
+            docling's XBRLBackendOptions.taxonomy. A relative path without
+            '..' components. Without it the fact graph carries no
+            presentation/calculation hierarchy (#466).
         chunker: { $ref: "#/components/schemas/Chunker" }
         chunk_tokenizer:
           type: string
@@ -823,6 +834,8 @@ components:
       { name: encoding, in: query, schema: { type: string } }
     video_frames:
       { name: video_frames, in: query, schema: { type: integer, minimum: 0 } }
+    xbrl_taxonomy:
+      { name: xbrl_taxonomy, in: query, schema: { type: string } }
     chunker:
       { name: chunker, in: query, schema: { $ref: "#/components/schemas/Chunker" } }
     chunk_tokenizer:

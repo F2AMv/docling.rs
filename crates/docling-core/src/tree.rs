@@ -106,6 +106,12 @@ pub enum TreeKind {
     },
     /// A form key-value region (`field_regions` / `field_items`).
     FieldRegion { items: Vec<FieldItem> },
+    /// A `KeyValueItem` (`key_value_items`): docling's `GraphData` of key and
+    /// value cells and their links, written verbatim.
+    KeyValueGraph {
+        cells: Vec<crate::GraphCell>,
+        links: Vec<crate::GraphLink>,
+    },
 }
 
 /// docling's `ProvenanceItem` for a tree item, written verbatim: the
@@ -276,6 +282,63 @@ impl ItemTree {
             Some(p) => self.items[p].children.push(id),
             None => self.body.push(id),
         }
+    }
+
+    /// Re-number the items in traversal order — a pre-order walk of the body
+    /// through every layer, which is how docling's
+    /// `DoclingDocument.concatenate` (and `_normalize_references`) re-creates
+    /// a document's items: a group created after the content it was later
+    /// wrapped around comes before that content afterwards. Items the walk
+    /// does not reach (deleted ones) are dropped. Returns each old id's new
+    /// id.
+    pub fn renumber_in_traversal_order(&mut self) -> Vec<Option<usize>> {
+        let mut order = Vec::with_capacity(self.items.len());
+        let mut stack: Vec<usize> = self.body.iter().rev().copied().collect();
+        while let Some(id) = stack.pop() {
+            if self.items[id].deleted {
+                continue;
+            }
+            order.push(id);
+            stack.extend(self.items[id].children.iter().rev());
+        }
+        let mut new_of: Vec<Option<usize>> = vec![None; self.items.len()];
+        for (new, &old) in order.iter().enumerate() {
+            new_of[old] = Some(new);
+        }
+        let remap = |ids: &mut Vec<usize>| {
+            *ids = ids.iter().filter_map(|&i| new_of[i]).collect();
+        };
+        let mut old_items: Vec<Option<TreeItem>> = std::mem::take(&mut self.items)
+            .into_iter()
+            .map(Some)
+            .collect();
+        for &old in &order {
+            let mut item = old_items[old].take().expect("each item visited once");
+            item.parent = item.parent.and_then(|p| new_of[p]);
+            remap(&mut item.children);
+            remap(&mut item.comments);
+            match &mut item.kind {
+                TreeKind::Table {
+                    rich_cells,
+                    captions,
+                    ..
+                } => {
+                    rich_cells.retain_mut(|(_, _, g)| match new_of[*g] {
+                        Some(n) => {
+                            *g = n;
+                            true
+                        }
+                        None => false,
+                    });
+                    remap(captions);
+                }
+                TreeKind::Picture { captions, .. } => remap(captions),
+                _ => {}
+            }
+            self.items.push(item);
+        }
+        remap(&mut self.body);
+        new_of
     }
 
     /// Remove `id` from the tree — docling's `delete_items`, which the DOCX
@@ -475,5 +538,60 @@ mod tests {
             2,
             "slide-0, slide-1 precede it in `groups`"
         );
+    }
+
+    /// `renumber_in_traversal_order`: docling's `concatenate` re-creates the
+    /// items as a pre-order walk meets them, so a group created after the
+    /// content it was wrapped around (a rich cell's group) comes first, and a
+    /// deleted item disappears; every cross-reference follows.
+    #[test]
+    fn renumbering_follows_the_traversal() {
+        let mut t = ItemTree::default();
+        let a = t.add(None, None, text("a"));
+        let table = t.add(
+            None,
+            None,
+            TreeKind::Table {
+                table: Table::default(),
+                rich_cells: Vec::new(),
+                captions: Vec::new(),
+            },
+        );
+        let cell_text = t.add(None, None, text("cell"));
+        let group = t.add(
+            Some(table),
+            None,
+            TreeKind::Group {
+                label: "unspecified".into(),
+                name: "rich_cell_group_1_0_0".into(),
+            },
+        );
+        t.reparent(cell_text, Some(group));
+        if let TreeKind::Table { rich_cells, .. } = &mut t.items[table].kind {
+            rich_cells.push((0, 0, group));
+        }
+        let gone = t.add(None, None, text("gone"));
+        t.delete(gone);
+        let z = t.add(None, None, text("z"));
+
+        let new_of = t.renumber_in_traversal_order();
+        assert_eq!(
+            new_of,
+            vec![Some(0), Some(1), Some(3), Some(2), None, Some(4)]
+        );
+        assert_eq!(t.items.len(), 5);
+        assert_eq!(t.body, vec![0, 1, 4]);
+        assert_eq!(t.items[1].children, vec![2], "the group follows its table");
+        assert_eq!(t.items[2].parent, Some(1));
+        assert_eq!(
+            t.items[3].parent,
+            Some(2),
+            "the cell text follows its group"
+        );
+        assert!(matches!(&t.items[3].kind, TreeKind::Text { text, .. } if text == "cell"));
+        assert!(
+            matches!(&t.items[1].kind, TreeKind::Table { rich_cells, .. } if rich_cells == &[(0, 0, 2)])
+        );
+        let _ = (a, z);
     }
 }

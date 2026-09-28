@@ -392,7 +392,11 @@ fn code_language_hint(pre: ElementRef) -> Option<String> {
 }
 
 /// Build docling's item tree for a parsed HTML document.
-pub(super) fn build_tree(parsed: &Html, images: &dyn ImageResolver) -> ItemTree {
+pub(super) fn build_tree(
+    parsed: &Html,
+    images: &dyn ImageResolver,
+    infer_furniture: bool,
+) -> ItemTree {
     let root = parsed.root_element();
     let mut w = Walker {
         tree: ItemTree::default(),
@@ -428,9 +432,10 @@ pub(super) fn build_tree(parsed: &Html, images: &dyn ImageResolver) -> ItemTree 
     let content = parsed.select(sel!("body")).next().unwrap_or(root);
     // `infer_furniture`: everything before the first heading (one not inside
     // a table) is site chrome on the furniture layer.
-    let has_header = content
-        .select(sel!("h1, h2, h3, h4, h5, h6"))
-        .any(|h| ancestor_named(*h, "table", None).is_none());
+    let has_header = infer_furniture
+        && content
+            .select(sel!("h1, h2, h3, h4, h5, h6"))
+            .any(|h| ancestor_named(*h, "table", None).is_none());
     w.layer = has_header.then_some(ContentLayer::Furniture);
     w.walk(content);
     w.tree
@@ -1874,7 +1879,11 @@ mod tests {
     use docling_core::tree::TreeItem;
 
     fn tree(html: &str) -> ItemTree {
-        build_tree(&Html::parse_document(html), &super::super::images::NoFetch)
+        build_tree(
+            &Html::parse_document(html),
+            &super::super::images::NoFetch,
+            true,
+        )
     }
 
     fn label(it: &TreeItem) -> String {
@@ -1885,6 +1894,7 @@ mod tests {
             TreeKind::Table { .. } => "table".into(),
             TreeKind::Picture { .. } => "picture".into(),
             TreeKind::FieldRegion { .. } => "field_region".into(),
+            TreeKind::KeyValueGraph { .. } => "key_value_region".into(),
         }
     }
 

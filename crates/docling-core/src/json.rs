@@ -286,7 +286,7 @@ pub fn to_json(doc: &DoclingDocument) -> Value {
         "texts": b.texts,
         "pictures": b.pictures,
         "tables": b.tables,
-        "key_value_items": [],
+        "key_value_items": b.key_value_items,
         "form_items": [],
         "pages": b.pages.iter().map(|(n, w, h)| {
             let r2 = |v: f64| (v * 100.0).round() / 100.0;
@@ -564,6 +564,7 @@ struct Builder {
     pictures: Vec<Value>,
     field_regions: Vec<Value>,
     field_items: Vec<Value>,
+    key_value_items: Vec<Value>,
     /// Pages seen so far (`page_no`, width, height in points) — from the
     /// [`Node::PageInfo`] markers the PDF paths emit; empty for every other
     /// backend, which keeps their JSON byte-identical (`"pages": {}`, no prov).
@@ -749,7 +750,7 @@ impl Builder {
         // Every item's `self_ref` first: children may be listed before they
         // are written (a rich cell's group is created after its content).
         let mut refs: Vec<String> = Vec::with_capacity(tree.items.len());
-        let (mut nt, mut ng, mut ntb, mut np, mut nf) = (0, 0, 0, 0, 0);
+        let (mut nt, mut ng, mut ntb, mut np, mut nf, mut nk) = (0, 0, 0, 0, 0, 0);
         for item in &tree.items {
             if item.deleted {
                 refs.push(String::new());
@@ -786,6 +787,10 @@ impl Builder {
                         .sum::<usize>();
                     nf += 1;
                     format!("#/field_regions/{}", nf - 1)
+                }
+                TreeKind::KeyValueGraph { .. } => {
+                    nk += 1;
+                    format!("#/key_value_items/{}", nk - 1)
                 }
             };
             refs.push(r);
@@ -999,6 +1004,14 @@ impl Builder {
                     }
                     r
                 }
+                TreeKind::KeyValueGraph { cells, links } => {
+                    self.pending_exact = None;
+                    let r = self.add_key_value_graph(cells, links, parent);
+                    if let Some(item) = self.key_value_items.last_mut() {
+                        item["content_layer"] = json!(layer);
+                    }
+                    r
+                }
             };
             debug_assert_eq!(self_ref, refs[id], "tree item {id} numbered out of order");
         }
@@ -1181,6 +1194,9 @@ impl Builder {
                 children,
             } => Some(self.add_group(label, name.as_deref(), *layer, children, parent)),
             Node::FieldRegion { items } => Some(self.add_field_region(items, parent)),
+            Node::KeyValueGraph { cells, links } => {
+                Some(self.add_key_value_graph(cells, links, parent))
+            }
             // A rich inline group is a text item over its Markdown text; the
             // structured runs are DocLang-only, so the JSON matches a paragraph.
             Node::InlineGroup { md_text, .. } => {
@@ -1273,6 +1289,52 @@ impl Builder {
             "label": "field_region",
             "prov": [],
         });
+        self_ref
+    }
+
+    /// A `KeyValueItem`: docling's `GraphData` written cell for cell and link
+    /// for link (`key_value_items/N`), the item itself childless and without
+    /// provenance, the way the XBRL backend creates it.
+    fn add_key_value_graph(
+        &mut self,
+        cells: &[crate::GraphCell],
+        links: &[crate::GraphLink],
+        parent: &str,
+    ) -> String {
+        let self_ref = format!("#/key_value_items/{}", self.key_value_items.len());
+        let cells: Vec<Value> = cells
+            .iter()
+            .map(|c| {
+                json!({
+                    "label": c.label,
+                    "cell_id": c.cell_id,
+                    "text": c.text,
+                    "orig": c.orig,
+                })
+            })
+            .collect();
+        let links: Vec<Value> = links
+            .iter()
+            .map(|l| {
+                json!({
+                    "label": l.label,
+                    "source_cell_id": l.source_cell_id,
+                    "target_cell_id": l.target_cell_id,
+                })
+            })
+            .collect();
+        self.key_value_items.push(json!({
+            "self_ref": self_ref,
+            "parent": { "$ref": parent },
+            "children": [],
+            "content_layer": "body",
+            "label": "key_value_region",
+            "prov": [],
+            "captions": [],
+            "references": [],
+            "footnotes": [],
+            "graph": { "cells": cells, "links": links },
+        }));
         self_ref
     }
 

@@ -137,6 +137,51 @@ fn video_frames_requires_a_number() {
     }
 }
 
+/// `--xbrl-taxonomy DIR` (#466) needs its directory, and with it an XBRL
+/// instance's JSON carries the fact graph with the presentation hierarchy the
+/// taxonomy's linkbases give it (`to_child` links), where the instance alone
+/// yields only the facts' own `to_value` links.
+#[test]
+fn xbrl_taxonomy_flag_feeds_the_fact_graph() {
+    let (code, _, stderr) = run(&["--xbrl-taxonomy"]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("--xbrl-taxonomy"), "{stderr}");
+
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/data/xbrl/sources/mlac-20251231.xml"
+    );
+    let taxonomy = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/data/xbrl/sources/mlac-taxonomy"
+    );
+    let (code, json, stderr) = run(&["--to", "json", "--xbrl-taxonomy", taxonomy, fixture]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        json.contains("\"self_ref\": \"#/key_value_items/0\""),
+        "{}",
+        &json[..200]
+    );
+    assert!(
+        json.contains("\"label\": \"to_child\""),
+        "no hierarchy links"
+    );
+    assert!(
+        json.contains("\"text\": \"weight: 1.0\""),
+        "no calculation weights"
+    );
+    // The instance's own directory holds no schema: the facts and their
+    // concepts, but none of the linkbases' ancestors or weights.
+    let (code, json, stderr) = run(&["--to", "json", fixture]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(json.contains("\"label\": \"to_value\""));
+    assert!(!json.contains("\"text\": \"weight: 1.0\""));
+    assert!(
+        !json.contains("CoverAbstract"),
+        "presentation ancestor without a taxonomy"
+    );
+}
+
 /// #460: `--ocr-engine` takes ppocr | tesseract, and `--ocr-lang` is checked
 /// against the engine whichever order the flags come in — `deu` is a
 /// Tesseract language, not a PP-OCR model.

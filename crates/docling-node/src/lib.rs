@@ -45,6 +45,9 @@ pub struct ConverterOptions {
     /// Max frames sampled from a video input as timestamped pictures (needs
     /// the ffmpeg binary at runtime; `0` = transcript only). Default 8.
     pub video_frames: Option<u32>,
+    /// XBRL: the directory the instance's taxonomy is read from (docling's
+    /// `XBRLBackendOptions.taxonomy`); unset = the instance's own directory.
+    pub xbrl_taxonomy: Option<String>,
     /// Convert only this PDF page window: `"A-B"` or a single page `"N"`
     /// (1-based inclusive — issue #80). Other formats ignore it.
     pub pages: Option<String>,
@@ -201,6 +204,8 @@ pub struct ConvertOptions {
     pub encoding: Option<String>,
     /// Max frames sampled from a video input (`0` = transcript only).
     pub video_frames: Option<u32>,
+    /// XBRL taxonomy directory (docling's `XBRLBackendOptions.taxonomy`).
+    pub xbrl_taxonomy: Option<String>,
     /// PDF page window `"A-B"` (or `"N"`), 1-based inclusive (#80).
     pub pages: Option<String>,
     /// OCR recognition language for scanned pages: `"en"` (default) | `"ch"`,
@@ -321,6 +326,7 @@ struct ConvertConfig {
     asr_lang: Option<String>,
     encoding: Option<String>,
     video_frames: Option<usize>,
+    xbrl_taxonomy: Option<String>,
     page_range: Option<(usize, usize)>,
     ocr_lang: Option<String>,
     ocr_mode: Option<String>,
@@ -404,6 +410,7 @@ fn build_config(o: ConvertOptions) -> Result<ConvertConfig> {
         asr_lang: o.asr_lang,
         encoding: o.encoding,
         video_frames: o.video_frames.map(|n| n as usize),
+        xbrl_taxonomy: o.xbrl_taxonomy,
         page_range,
         ocr_lang: parse_ocr_lang(o.ocr_lang, o.ocr_engine.as_deref())?,
         ocr_mode: parse_ocr_mode(o.ocr_mode)?,
@@ -612,6 +619,10 @@ fn build_converter(cfg: &ConvertConfig) -> RsConverter {
         .encoding(cfg.encoding.clone());
     let base = match cfg.video_frames {
         Some(max) => base.video_frames(max),
+        None => base,
+    };
+    let base = match &cfg.xbrl_taxonomy {
+        Some(dir) => base.xbrl_taxonomy(dir.clone()),
         None => base,
     };
     let base = match cfg.page_range {
@@ -842,6 +853,7 @@ pub struct DocumentConverter {
     asr_lang: Option<String>,
     encoding: Option<String>,
     video_frames: Option<usize>,
+    xbrl_taxonomy: Option<String>,
     page_range: Option<(usize, usize)>,
     ocr_lang: Option<String>,
     ocr_mode: Option<String>,
@@ -885,6 +897,7 @@ impl DocumentConverter {
             asr_lang: o.asr_lang.clone(),
             encoding: o.encoding.clone(),
             video_frames: o.video_frames.map(|n| n as usize),
+            xbrl_taxonomy: o.xbrl_taxonomy.clone(),
             page_range,
             ocr_lang: parse_ocr_lang(o.ocr_lang.clone(), o.ocr_engine.as_deref())?,
             ocr_mode: parse_ocr_mode(o.ocr_mode.clone())?,
@@ -925,6 +938,7 @@ impl DocumentConverter {
             asr_lang: self.asr_lang.clone(),
             encoding: self.encoding.clone(),
             video_frames: self.video_frames,
+            xbrl_taxonomy: self.xbrl_taxonomy.clone(),
             page_range: self.page_range,
             ocr_lang: self.ocr_lang.clone(),
             ocr_mode: self.ocr_mode.clone(),
@@ -1430,6 +1444,7 @@ fn output_config(out: Option<OutputOptions>, strict: bool) -> Result<ConvertConf
         asr_lang: None,
         encoding: None,
         video_frames: None,
+        xbrl_taxonomy: None,
         page_range: None,
         list_attachments: false,
         skip_empty_cells: false,

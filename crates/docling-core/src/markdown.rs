@@ -2,6 +2,11 @@
 
 use crate::document::{DoclingDocument, Node, Table};
 
+/// What docling's Markdown serializer writes for an item it has no component
+/// for — a `KeyValueItem` (the XBRL fact graph) is the one such item a backend
+/// produces.
+const MISSING_KEY_VALUE_ITEM: &str = "<!-- missing-key-value-item -->";
+
 /// How pictures are rendered (mirrors docling-core's `ImageRefMode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ImageMode {
@@ -685,6 +690,9 @@ fn render_one(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
                 }
             }
         }
+        // docling's Markdown serializer has no component for a `KeyValueItem`
+        // and writes its fallback placeholder in the item's place.
+        Node::KeyValueGraph { .. } => blocks.push(MISSING_KEY_VALUE_ITEM.to_string()),
         // A rich inline group renders exactly like a paragraph of its Markdown
         // text — the structured runs are DocLang-only.
         Node::InlineGroup { md_text, .. } => {

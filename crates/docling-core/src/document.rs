@@ -195,6 +195,17 @@ pub enum Node {
     /// `id`-convention); the serializers render each item's parts as separate
     /// labelled texts (`marker` / `field_key` / `field_value`).
     FieldRegion { items: Vec<FieldItem> },
+    /// docling's `KeyValueItem`: a graph of key and value cells and the links
+    /// between them (docling-core's `GraphData`). The XBRL backend builds one
+    /// from an instance's numeric facts and the presentation and calculation
+    /// hierarchies of its taxonomy. Only the JSON export carries the graph:
+    /// docling's Markdown serializer has no rendering for the item and writes
+    /// its `<!-- missing-key-value-item -->` placeholder, which the Markdown
+    /// export reproduces; the other serializers omit it.
+    KeyValueGraph {
+        cells: Vec<GraphCell>,
+        links: Vec<GraphLink>,
+    },
     /// Rich inline content — docling's `InlineGroup`: a run of styled text
     /// segments that a backend captured with formatting (`<bold>`, `<italic>`,
     /// `<underline>`, `<strikethrough>`, sub/superscript, inline `<code>`) the
@@ -435,6 +446,30 @@ pub struct FieldItem {
     /// docling's `kind` on the `field_value` item — `read_only` or
     /// `fillable` (the value is or holds a form control); JSON-only.
     pub value_kind: Option<String>,
+}
+
+/// One node of a [`Node::KeyValueGraph`] — docling-core's `GraphCell`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphCell {
+    /// docling's `GraphCellLabel` value: `key` or `value` (it also knows
+    /// `unspecified` and `checkbox`).
+    pub label: String,
+    /// The cell's number within its graph, what the links refer to.
+    pub cell_id: usize,
+    pub text: String,
+    /// The text before any cleanup — for an XBRL fact key, the concept's
+    /// qualified name where `text` is its local name.
+    pub orig: String,
+}
+
+/// One edge of a [`Node::KeyValueGraph`] — docling-core's `GraphLink`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphLink {
+    /// docling's `GraphLinkLabel` value: `to_value`, `to_child`, `to_parent`
+    /// or `to_key`.
+    pub label: String,
+    pub source_cell_id: usize,
+    pub target_cell_id: usize,
 }
 
 /// One DocumentPictureClassifier prediction — docling-core's

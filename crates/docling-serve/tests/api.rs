@@ -182,6 +182,7 @@ async fn serves_its_logo_and_openapi_description() {
         "asr_model:",
         "encoding:",
         "video_frames:",
+        "xbrl_taxonomy:",
     ] {
         assert!(spec.contains(opt), "option {opt} missing from openapi.yaml");
     }
@@ -871,6 +872,17 @@ async fn chunk_tokenizer_path_escape_is_a_400() {
             b"a,b\n1,2\n",
             &[("to", "chunks"), ("chunk_tokenizer", bad)],
         );
+        let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "for {bad:?}");
+    }
+}
+
+#[tokio::test]
+async fn xbrl_taxonomy_path_escape_is_a_400() {
+    // #466: the taxonomy directory is a server-local relative path, held to
+    // the `chunk_tokenizer` rule — no traversal, no absolute paths.
+    for bad in ["../taxonomies", "/etc"] {
+        let (ct, body) = multipart("t.csv", b"a,b\n1,2\n", &[("xbrl_taxonomy", bad)]);
         let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "for {bad:?}");
     }

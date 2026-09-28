@@ -193,6 +193,7 @@ impl PyDocumentConverter {
         asr_lang = None,
         encoding = None,
         video_frames = None,
+        xbrl_taxonomy = None,
         page_range = None,
         ocr_lang = None,
         ocr_mode = None,
@@ -227,6 +228,7 @@ impl PyDocumentConverter {
         asr_lang: Option<String>,
         encoding: Option<String>,
         video_frames: Option<usize>,
+        xbrl_taxonomy: Option<std::path::PathBuf>,
         page_range: Option<(usize, usize)>,
         ocr_lang: Option<String>,
         ocr_mode: Option<String>,
@@ -277,6 +279,13 @@ impl PyDocumentConverter {
         // transcript only; extraction needs the ffmpeg binary at runtime).
         let base = match video_frames {
             Some(max) => base.video_frames(max),
+            None => base,
+        };
+        // `xbrl_taxonomy` is the directory an XBRL instance's taxonomy is read
+        // from (docling's `XBRLBackendOptions.taxonomy`); unset = the
+        // instance's own directory.
+        let base = match xbrl_taxonomy {
+            Some(dir) => base.xbrl_taxonomy(dir),
             None => base,
         };
         // `page_range=(first, last)` converts only that 1-based inclusive PDF

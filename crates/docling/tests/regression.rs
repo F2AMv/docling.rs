@@ -138,9 +138,42 @@ fn expected_path(src: &Source, suffix: &str) -> PathBuf {
     src.fmt_dir.join("expected").join(format!("{name}{suffix}"))
 }
 
+/// A converter for `src`. An XBRL instance is paired with the `*-taxonomy`
+/// directory beside it that holds the schema its `link:schemaRef` names — the
+/// layout upstream's `tests/data/xbrl/sources/` keeps its fixtures in, whose
+/// test passes that directory as the backend's `taxonomy` option.
+fn converter_for(src: &Path) -> DocumentConverter {
+    let mut converter = DocumentConverter::new();
+    if let Some(taxonomy) = xbrl_taxonomy_dir(src) {
+        converter = converter.xbrl_taxonomy(taxonomy);
+    }
+    converter
+}
+
+fn xbrl_taxonomy_dir(src: &Path) -> Option<PathBuf> {
+    let dir = src.parent()?;
+    if dir.parent()?.file_name()? != "xbrl" {
+        return None;
+    }
+    let text = fs::read_to_string(src).ok()?;
+    let href = text
+        .split("schemaRef")
+        .nth(1)?
+        .split("href=\"")
+        .nth(1)?
+        .split('"')
+        .next()?;
+    fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.to_string_lossy().ends_with("-taxonomy"))
+        .find(|p| p.join(href).is_file())
+}
+
 fn convert(src: &Path, strict: bool) -> Result<docling::DoclingDocument, String> {
     let source = SourceDocument::from_file(src).map_err(|e| e.to_string())?;
-    DocumentConverter::new()
+    converter_for(src)
         .strict(strict)
         .convert(source)
         .map(|r| r.document)
@@ -150,7 +183,7 @@ fn convert(src: &Path, strict: bool) -> Result<docling::DoclingDocument, String>
 /// Convert via the streaming API and concatenate every chunk.
 fn stream_to_string(src: &Path, strict: bool) -> Result<String, String> {
     let source = SourceDocument::from_file(src).map_err(|e| e.to_string())?;
-    let stream = DocumentConverter::new()
+    let stream = converter_for(src)
         .strict(strict)
         .convert_streaming(source)
         .map_err(|e| e.to_string())?;

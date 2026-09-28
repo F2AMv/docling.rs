@@ -594,6 +594,11 @@ struct Builder {
     /// its group `$ref`, or its note text's when the section says so. The index
     /// is what a [`Node::Commented`] annotation carries.
     comment_groups: Vec<String>,
+    /// The last `comment_section` group emitted, as `(name, self_ref)`: a
+    /// following section of the same name adds its note to that group rather
+    /// than opening another — one `comment-{sheet}-{cell}` group holds every
+    /// message of a threaded comment (docling#4353).
+    last_comment_section: Option<(String, String)>,
     /// Annotated items awaiting their refs: comments are usually emitted
     /// *after* the body they annotate (docx appends them), so the link is
     /// patched in once the whole document has been walked.
@@ -1069,6 +1074,28 @@ impl Builder {
                     self.comment_groups.push(child.clone());
                     return Some(child);
                 }
+                if let Some((_, self_ref)) = self
+                    .last_comment_section
+                    .as_ref()
+                    .filter(|(n, _)| n == name)
+                    .cloned()
+                {
+                    // Another message of the same thread: a further note in
+                    // the group already open for this cell.
+                    let child =
+                        self.add_text("text", text, &self_ref, json!({ "content_layer": "notes" }));
+                    if let Some(children) =
+                        self.groups[group_index(&self_ref)]["children"].as_array_mut()
+                    {
+                        children.push(json!({ "$ref": child }));
+                    }
+                    self.comment_groups.push(if *refs_note_text {
+                        child
+                    } else {
+                        self_ref.clone()
+                    });
+                    return Some(self_ref);
+                }
                 let self_ref = format!("#/groups/{}", self.groups.len());
                 self.groups.push(Value::Null);
                 let child =
@@ -1081,6 +1108,7 @@ impl Builder {
                     "name": name,
                     "label": "comment_section",
                 });
+                self.last_comment_section = Some((name.clone(), self_ref.clone()));
                 self.comment_groups.push(if *refs_note_text {
                     child
                 } else {

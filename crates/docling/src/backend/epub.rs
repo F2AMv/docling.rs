@@ -54,7 +54,7 @@ impl DeclarativeBackend for EpubBackend {
         // path (which each `<img src>` is rewritten to during concatenation).
         let mut images: HashMap<String, PictureImage> = HashMap::new();
         for file in &spine {
-            let Some(xhtml) = pkg.read(file) else {
+            let Some(xhtml) = read_content(&mut pkg, file) else {
                 continue;
             };
             let body = body_re
@@ -88,6 +88,39 @@ impl DeclarativeBackend for EpubBackend {
 /// Rewrite each in-archive `<img src>` in `body` to its resolved archive path and
 /// read the image bytes into `images`. `data:`/remote sources are left untouched
 /// (they stay placeholders for EPUB). `dir` is the spine file's directory.
+/// A spine content document as text: UTF-8, or UTF-16 when it opens with a
+/// UTF-16 byte order mark (docling#4351 — `xhtml_data.decode("utf-8")` used to
+/// drop such a file). The BOM itself is not part of the text.
+fn read_content(pkg: &mut Package, path: &str) -> Option<String> {
+    let text = decode_content(pkg.read_bytes(path)?)?;
+    if let Err(e) = super::xml_depth::check(&text, path) {
+        eprintln!("docling: {e}; part skipped");
+        return None;
+    }
+    Some(text)
+}
+
+/// docling's `_decode_content_file`: UTF-16 behind a UTF-16 BOM, else UTF-8.
+fn decode_content(bytes: Vec<u8>) -> Option<String> {
+    Some(match bytes.as_slice() {
+        [0xFF, 0xFE, rest @ ..] | [0xFE, 0xFF, rest @ ..] => {
+            let big_endian = bytes[0] == 0xFE;
+            let units: Vec<u16> = rest
+                .chunks_exact(2)
+                .map(|c| {
+                    if big_endian {
+                        u16::from_be_bytes([c[0], c[1]])
+                    } else {
+                        u16::from_le_bytes([c[0], c[1]])
+                    }
+                })
+                .collect();
+            String::from_utf16_lossy(&units)
+        }
+        _ => String::from_utf8(bytes).ok()?,
+    })
+}
+
 fn extract_images(
     body: &str,
     dir: &str,
@@ -217,6 +250,26 @@ fn percent_decode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn utf16_content_documents_decode_behind_their_bom() {
+        // docling#4351: a UTF-16 content document used to be dropped.
+        let le: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain("<p>hé</p>".encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        assert_eq!(super::decode_content(le).as_deref(), Some("<p>hé</p>"));
+        let be: Vec<u8> = [0xFE, 0xFF]
+            .into_iter()
+            .chain("<p>x</p>".encode_utf16().flat_map(u16::to_be_bytes))
+            .collect();
+        assert_eq!(super::decode_content(be).as_deref(), Some("<p>x</p>"));
+        assert_eq!(
+            super::decode_content(b"<p>y</p>".to_vec()).as_deref(),
+            Some("<p>y</p>")
+        );
+        assert_eq!(super::decode_content(vec![0xC3, 0x28]), None);
+    }
+
     use super::*;
 
     /// docling#4261 (2.129): a manifest href stepping out of the OPF directory

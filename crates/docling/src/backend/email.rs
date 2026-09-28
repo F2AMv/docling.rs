@@ -195,20 +195,25 @@ fn body_paragraphs(msg: &Message) -> Vec<String> {
         }
     };
     let mut out = Vec::new();
-    let plain = msg.text_body_count();
-    if plain > 0 {
-        for i in 0..plain {
-            if let Some(t) = msg.body_text(i) {
-                split(&t, &mut out);
-            }
+    for i in 0..msg.text_body_count() {
+        if let Some(t) = msg.body_text(i) {
+            split(&t, &mut out);
         }
+    }
+    // A present `text/plain` part is not necessarily a body: many senders
+    // emit a blank one beside the real `text/html` in a multipart/alternative
+    // message, so only a part that produced text wins (docling#4295).
+    if !out.is_empty() {
         return out;
     }
-    // No plain text — fall back to the raw HTML body as text (the test corpus is
-    // plain-text only; full HTML→Markdown of email bodies is a later refinement).
+    // No plain text — the `text/html` part(s), converted through the HTML
+    // backend and split into paragraphs (docling's `_convert_html_part` +
+    // `_split_paragraphs` over its Markdown).
     for i in 0..msg.html_body_count() {
         if let Some(t) = msg.body_html(i) {
-            split(&t, &mut out);
+            let html_doc =
+                super::html::convert_html("email-body.html", &t, &super::images::NoFetch);
+            split(&html_doc.export_to_markdown(), &mut out);
         }
     }
     out

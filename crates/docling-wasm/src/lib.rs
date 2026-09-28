@@ -140,13 +140,13 @@ pub fn supported_extensions() -> String {
     // formats (images, audio, video, mets tarballs).
     let exts = [
         "docx", "dotx", "docm", "dotm", "pptx", "potx", "ppsx", "pptm", "potm", "ppsm", "md",
-        "txt", "text", "qmd", "rmd", "html", "htm", "xhtml", "xml", "nxml", "dclg", "dclx", "adoc",
-        "asciidoc", "asc", "csv", "tsv", "xlsx", "xlsm", "xlsb", "xltx", "xltm", "odt", "ott",
-        "ods", "ots", "odp", "otp", "sxw", "stw", "sxg", "sxc", "stc", "sxi", "sti", "fodt",
-        "fods", "fodp", "json", "sdw", "sda", "sdd", "vor", "abw", "zabw", "awt", "wpd", "wp",
-        "wp5", "wp6", "wpt", "wps", "dbf", "dif", "slk", "sylk", "wk1", "wk2", "wk3", "wk4", "wks",
-        "wrk", "123", "wq1", "wq2", "wb1", "wb2", "wb3", "qpw", "xlr", "vtt", "tex", "latex",
-        "eml", "epub", "mhtml", "mht", "rtf", "vsdx", "vsdm", "pdf", "djvu", "djv",
+        "markdown", "txt", "text", "qmd", "rmd", "html", "htm", "xhtml", "xml", "nxml", "dclg",
+        "dclx", "adoc", "asciidoc", "asc", "csv", "tsv", "xlsx", "xlsm", "xlsb", "xltx", "xltm",
+        "odt", "ott", "ods", "ots", "odp", "otp", "sxw", "stw", "sxg", "sxc", "stc", "sxi", "sti",
+        "fodt", "fods", "fodp", "json", "sdw", "sda", "sdd", "vor", "abw", "zabw", "awt", "wpd",
+        "wp", "wp5", "wp6", "wpt", "wps", "dbf", "dif", "slk", "sylk", "wk1", "wk2", "wk3", "wk4",
+        "wks", "wrk", "123", "wq1", "wq2", "wb1", "wb2", "wb3", "qpw", "xlr", "vtt", "tex",
+        "latex", "eml", "epub", "mhtml", "mht", "rtf", "vsdx", "vsdm", "pdf", "djvu", "djv",
     ];
     serde_json::to_string(exts.as_slice()).expect("static array serializes")
 }

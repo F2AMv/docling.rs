@@ -58,24 +58,25 @@ const HEADINGS: &[(&str, u8)] = &[
 
 impl Parser<'_> {
     /// The body walk follows docling's `_process_nodes` — a text buffer
-    /// flushed at headings, environments, math and paragraph breaks — with one
-    /// deliberate difference. pylatexenc hands docling the plain text between
-    /// two macros as one *chars node*, and docling's `_process_chars_node`
-    /// splits a node holding a paragraph break and `strip()`s the part before
-    /// it: the space that follows the paragraph's last macro is lost
-    /// (`\textit{italic} text.` → `italictext.`, upstream's own groundtruth
-    /// for `example_01.tex` reads so), and every part after the break becomes
-    /// a paragraph on the spot, cutting a sentence that continues with a
-    /// macro in two. Both corrupt the text, so they are *not* reproduced here
-    /// (docling#4339); the fixture's one-word difference is the known,
-    /// intended residual until docling fixes it.
+    /// flushed at headings, environments, display math and paragraph breaks.
+    /// pylatexenc hands docling the plain text between two macros as one
+    /// *chars node*; `_process_chars_node` (as fixed by docling#4340) splits a
+    /// node holding a paragraph break, glues its first part to the buffer
+    /// unstripped, flushes, adds every *middle* part as a `paragraph` item of
+    /// its own, and keeps the *last* part in the buffer so the inline macros,
+    /// math and citations that continue the sentence land in the same item.
+    /// Inline math is appended to the buffer too (`_process_math_node`). So a
+    /// stretch of text is a `paragraph` only when it began right after a
+    /// blank line, ends at one, and nothing but plain characters contributed
+    /// to it; everything else is flushed by the node that follows it as a
+    /// `text` item.
     fn run(&mut self, doc: &mut DoclingDocument) {
         let mut para = String::new();
-        // Whether `para` started right after a paragraph break, with no
-        // macro, math or environment since: upstream labels such text
-        // `paragraph` (the tail parts of a chars node holding `\n\n`), and
-        // everything that went through its text buffer `text`.
+        // Whether `para` started right after a paragraph break.
         let mut after_break = false;
+        // Whether a non-chars node (inline math) contributed to `para`; a
+        // macro shows up as a backslash in the buffer itself.
+        let mut has_math = false;
         while self.i < self.chars.len() {
             let rest: String = self.chars[self.i..].iter().collect();
             if rest.starts_with("\\maketitle") {
@@ -92,8 +93,9 @@ impl Parser<'_> {
             } else if let Some((cmd, level)) = HEADINGS.iter().find(|(c, _)| {
                 rest.starts_with(*c) && !rest[c.len()..].starts_with(|ch: char| ch.is_alphabetic())
             }) {
-                flush(&mut para, doc, after_break);
+                flush(&mut para, doc, false);
                 after_break = false;
+                has_math = false;
                 self.i += cmd.len();
                 self.skip_star();
                 let text = clean_inline(&self.read_group());
@@ -111,40 +113,41 @@ impl Parser<'_> {
                     text,
                 });
             } else if rest.starts_with("\\begin{") {
-                flush(&mut para, doc, after_break);
+                flush(&mut para, doc, false);
                 after_break = false;
+                has_math = false;
                 self.read_environment(doc);
             } else if rest.starts_with("\\[") || rest.starts_with("$$") {
-                flush(&mut para, doc, after_break);
+                flush(&mut para, doc, false);
                 after_break = false;
+                has_math = false;
                 let close = if rest.starts_with("\\[") { "\\]" } else { "$$" };
                 self.i += 2;
                 let math = self.read_until(close);
                 emit_formula(doc, &math.split_whitespace().collect::<Vec<_>>().join(" "));
             } else if self.chars[self.i] == '$' {
-                // Inline math becomes its own block (docling extracts formulas).
-                flush(&mut para, doc, after_break);
-                after_break = false;
+                // Inline math joins the text buffer, `$…$` included (upstream's
+                // `_process_math_node` appends `latex_verbatim()` for non-display
+                // math), so `Inline math: $E = mc^2$` stays one `text` item.
                 self.i += 1;
                 let math = self.read_until("$");
-                // Upstream appends inline math to its text buffer, so the item
-                // it lands in is a `text`, `$…$` included.
-                let text = format!(
+                para.push_str(&format!(
                     "${}$",
                     math.split_whitespace().collect::<Vec<_>>().join(" ")
-                );
-                add_text(doc, "text", &text, None, None);
-                doc.push(Node::Paragraph { text });
+                ));
+                has_math = true;
             } else if self.chars[self.i] == '\n' && self.peek_blank_line() {
-                flush(&mut para, doc, after_break);
+                let as_paragraph = after_break && !has_math && !para.contains('\\');
+                flush(&mut para, doc, as_paragraph);
                 after_break = true;
+                has_math = false;
                 self.consume_blank_line();
             } else {
                 para.push(self.chars[self.i]);
                 self.i += 1;
             }
         }
-        flush(&mut para, doc, after_break);
+        flush(&mut para, doc, false);
     }
 
     /// `\begin{env} … \end{env}` — handle the structural environments, ignore others.
@@ -308,17 +311,13 @@ fn emit_formula(doc: &mut DoclingDocument, math: &str) {
     });
 }
 
-/// Flush the paragraph buffer. `after_break` says the buffer began right
-/// after a blank line; upstream then adds the text as a `paragraph` item —
-/// unless a macro contributed to it, since a macro ends the chars node and
-/// upstream's `_process_chars_node` routes the part before it through the
-/// text buffer (label `text`). The merged item keeps that label.
-fn flush(para: &mut String, doc: &mut DoclingDocument, after_break: bool) {
-    let label = if after_break && !para.contains('\\') {
-        "paragraph"
-    } else {
-        "text"
-    };
+/// Flush the paragraph buffer. `as_paragraph` says the text is a middle part
+/// of a chars node — it began right after a blank line, ends at one, and no
+/// macro or math contributed to it — which upstream's `_process_chars_node`
+/// adds as a `paragraph` item; everything that went through the text buffer
+/// is a `text` item.
+fn flush(para: &mut String, doc: &mut DoclingDocument, as_paragraph: bool) {
+    let label = if as_paragraph { "paragraph" } else { "text" };
     let text = clean_inline(para);
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if !text.is_empty() {
@@ -641,10 +640,11 @@ mod tests {
     }
 
     /// The item tree docling's backend builds: everything on the body, the
-    /// `paragraph` label for text a chars node's `\n\n` split off vs `text`
-    /// for buffered text (inline math included), `formula` items, list
-    /// items that are never `enumerated`, and `tabular` cells with no
-    /// header roles down to the trailing blank row.
+    /// `paragraph` label for a chars node's middle part vs `text` for
+    /// buffered text (a sentence continued by inline math included,
+    /// docling#4340), `formula` items, list items that are never
+    /// `enumerated`, and `tabular` cells with no header roles down to the
+    /// trailing blank row.
     #[test]
     fn tree_labels_and_list_meta_follow_docling() {
         let tex = "\\title{T}\\author{A}\n\\begin{document}\n\\maketitle\n\n            \\section{Math}\n\nInline math: $x$\n\nDisplay:\n$$y = 1$$\n\n            \\subsection{List}\nAfter a heading \\textbf{bold} text.\n\n            \\begin{enumerate}\n\\item one\n\\item two\n\\end{enumerate}\n\n            \\begin{tabular}{cc}\n\\hline\na & b \\\\\n\\hline\n\\end{tabular}\n\\end{document}";
@@ -662,9 +662,10 @@ mod tests {
                 ("title", "T"),
                 ("text", "A"),
                 ("section_header", "Math"),
-                ("paragraph", "Inline math:"),
-                ("text", "$x$"),
-                ("paragraph", "Display:"),
+                // Inline math stays in the sentence's buffer; the text before
+                // display math is the buffer's last part — both `text`.
+                ("text", "Inline math: $x$"),
+                ("text", "Display:"),
                 ("formula", "y = 1"),
                 ("section_header", "List"),
                 // Merged across the macro (docling#4339): the buffer's label.
@@ -674,7 +675,7 @@ mod tests {
             ]
         );
         assert_eq!(texts[2]["level"], 1);
-        assert_eq!(texts[7]["level"], 2);
+        assert_eq!(texts[6]["level"], 2);
         assert_eq!(texts[9]["enumerated"], false);
         assert_eq!(texts[9]["marker"], "");
         assert_eq!(texts[9]["parent"]["$ref"], "#/groups/0");

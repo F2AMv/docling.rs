@@ -119,11 +119,11 @@ pub struct TreeProv {
     pub page_no: usize,
     /// `[l, t, r, b]`, exactly as docling computed them.
     pub bbox: [f64; 4],
-    /// docling's `coord_origin` tag. `MsPowerpointDocumentBackend` builds a
-    /// shape's box with `BoundingBox.from_tuple(…, BOTTOMLEFT)` — which reads
-    /// the tuple as `(l, b, r, t)`, so the shape's top EMU lands in `b` — a
-    /// quirk the JSON keeps; a speaker note's zero box is `TOPLEFT`
-    /// (`BoundingBox`'s default).
+    /// docling's `coord_origin` tag. The office backends tag their
+    /// top-left-based boxes `TOPLEFT` (the PPTX backend since docling#4294 —
+    /// it used to tag them `BOTTOMLEFT`, which read the tuple as `(l, b, r,
+    /// t)` and swapped the vertical edges); a backend that really works in a
+    /// bottom-left space sets this.
     pub bottom_left: bool,
     /// `[0, len(text)]` in characters for a text item, `[0, 0]` for a table
     /// or picture.

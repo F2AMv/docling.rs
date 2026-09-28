@@ -489,19 +489,19 @@ pub(crate) fn emit(content: Content, doc: &mut DoclingDocument) {
 /// start of a fresh top-level list as `first_in_list`; ordered items are
 /// numbered by their position at their depth, as docling's serializer does.
 #[derive(Default)]
-struct ListStack {
+pub(crate) struct ListStack {
     open: bool,
     /// Items emitted so far at each depth of the open list.
     counts: Vec<u64>,
 }
 
 impl ListStack {
-    fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.open = false;
         self.counts.clear();
     }
 
-    fn item(&mut self, p: &Paragraph, label: &ListLabel) -> Node {
+    pub(crate) fn item(&mut self, p: &Paragraph, label: &ListLabel) -> Node {
         let first_in_list = !self.open;
         self.open = true;
         self.counts.truncate(label.depth + 1);
@@ -534,7 +534,7 @@ impl ListStack {
 
 /// `_uniform`: whether every run shares one formatting and one link — then the
 /// first run stands for the paragraph.
-fn uniform_run(runs: &[Run]) -> (Option<&Run>, bool) {
+pub(crate) fn uniform_run(runs: &[Run]) -> (Option<&Run>, bool) {
     let runs: Vec<&Run> = runs.iter().filter(|r| !r.text.is_empty()).collect();
     let Some(first) = runs.first() else {
         return (None, true);
@@ -549,7 +549,7 @@ fn uniform_run(runs: &[Run]) -> (Option<&Run>, bool) {
 /// body text. A paragraph whose runs differ in formatting or link becomes an
 /// inline group of items (docling's shape for mixed runs, whose Markdown joins
 /// the items with single spaces); a uniform one is a single item.
-fn paragraph_node(p: &Paragraph) -> Node {
+pub(crate) fn paragraph_node(p: &Paragraph) -> Node {
     match p.label {
         // `Node::Heading` level 1 is docling's title; a section header of
         // docling level N is our level N + 1. Headings carry the plain text.

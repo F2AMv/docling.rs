@@ -44,6 +44,36 @@ dehyphenation (docling#3888, ported in #250) — both sides now join a
 hard-hyphenated lowercase continuation across a column/page break without the
 `word- continuation` artifact — and the groundtruth refresh below.
 
+### Region-scoped OCR reads overlapping regular regions once
+
+RT-DETR often reads a sparse scanned page twice over: a high-score `text`
+box per line *and* one lower-score paragraph box covering them.
+`assemble::greedy` keeps detections by descending score and drops a
+candidate mostly inside an already-kept one, so the block survives next to
+its lines. On a digital page nothing shows — `fit_regions_to_cells` hands
+each text cell to one owner and drops the regions left empty — but on an
+OCR'd page the cells come from recognizing *each region's crop*: the block
+and every line inside it were recognized, the block then owned both cell
+sets, and its paragraph carried every line twice (a synthetic 8-line
+Portuguese scan from #471 produced 15 cells; PP-OCR and Tesseract alike).
+Upstream never has the problem — its OCR runs over the bitmap before layout
+postprocessing and each cell is assigned once — and its regular pass then
+groups clusters that overlap (IoU > 0.8, or either > 80 % contained in the
+other) with a union-find, keeping one survivor per group
+(`_should_prefer_cluster` / `_select_best_cluster_from_group`:
+`area_threshold` 1.3, `conf_threshold` 0.05, a LIST_ITEM beats a same-sized
+TEXT, a CODE box beats what it contains) and merging the losers' cells into
+it. `assemble::merge_overlapping_regulars` ports that selection and runs on
+OCR'd pages right before the region pass: one survivor per group, its label
+and score, on the group's **union** box so the single crop still covers
+every merged line. Digital pages, pictures and wrappers are untouched.
+Snapshot fallout: 1 file — `old_newspaper.png` loses its duplicated
+`Hours` / `11A.M.to11P.M` lines (the ad's line boxes under their block), and
+the merged Dunlop ad block now sits at its picture's position in the reading
+order; the other 96 snapshots are byte-identical. Groundtruth: unchanged — 9/17 strict, 10/17
+whitespace-normalized, every per-file diff count as in the table above (the
+groundtruth PDFs are digital pages, which this pass never touches).
+
 ### docling-core 2.96 table headers: PDF baselines refreshed
 
 The table-header rule ported in #362 (docling-core#723/#756 — the header block

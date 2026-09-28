@@ -16,7 +16,7 @@
 //! Options are one JSON object whose keys mirror docling-serve's request
 //! options (`to`, `strict`, `images`, `no_ocr`, `force_full_page_ocr`,
 //! `no_table_former`, `no_text_panels`, `fetch_images`, `asr_model`,
-//! `asr_lang`, `encoding`, `video_frames`, `pages`, `ocr_lang`); unknown keys fail the
+//! `asr_lang`, `encoding`, `video_frames`, `xbrl_taxonomy`, `pages`, `ocr_lang`); unknown keys fail the
 //! conversion with a clear message rather than silently doing nothing — an
 //! embedder's typo should not go unnoticed. `NULL` or `""` means defaults.
 //!
@@ -61,6 +61,9 @@ struct Options {
     /// `TextBackendOptions.encoding`, a WHATWG label); unset = detect.
     encoding: Option<String>,
     video_frames: Option<usize>,
+    /// XBRL: the directory the instance's taxonomy is read from (docling's
+    /// `XBRLBackendOptions.taxonomy`).
+    xbrl_taxonomy: Option<String>,
     /// PDF page window, `"A-B"` or a single `"N"` (1-based inclusive, #80).
     pages: Option<String>,
     /// OCR recognition language for scanned pages: `en` (default) | `ch`.
@@ -132,6 +135,9 @@ fn convert_impl(bytes: &[u8], filename: &str, options_json: &str) -> Result<Vec<
         .skip_empty_cells(options.skip_empty_cells.unwrap_or(false));
     if let Some(mode) = &options.ocr_mode {
         converter = converter.ocr_mode(mode.clone());
+    }
+    if let Some(dir) = &options.xbrl_taxonomy {
+        converter = converter.xbrl_taxonomy(dir);
     }
     if let Some(scale) = options.ocr_scale {
         converter = converter.ocr_scale(scale);

@@ -934,6 +934,7 @@ mod tests {
             TreeKind::Table { .. } => "table".into(),
             TreeKind::Picture { .. } => "picture".into(),
             TreeKind::FieldRegion { .. } => "field_region".into(),
+            TreeKind::KeyValueGraph { .. } => "key_value_region".into(),
         }
     }
 

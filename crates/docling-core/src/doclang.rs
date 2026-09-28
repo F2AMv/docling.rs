@@ -1008,6 +1008,8 @@ fn emit_nodes(out: &mut Out, depth: i32, nodes: &[Node], i: &mut usize, level: u
                 emit_field_region(out, depth, items);
                 *i += 1;
             }
+            // DocLang has no element for a key-value graph.
+            Node::KeyValueGraph { .. } => *i += 1,
             Node::InlineGroup {
                 unwrapped, runs, ..
             } => {

@@ -118,6 +118,21 @@ to its frames alone. What symphonia can't decode in-process — Ogg **Opus**
 falls back to the same optional ffmpeg binary when present; without ffmpeg
 those inputs fail with a targeted message and an install hint.
 
+**XBRL** (SEC-style financial instance documents, content-sniffed from `.xml`)
+converts without arelle: the `dei` facts make the title, each
+`textBlockItemType` fact is an HTML fragment converted in place, and the
+numeric facts end the document as docling's key-value graph (`GraphData`
+in the JSON, one key cell per fact over its value, period, unit and
+decimals cells, plus the concept hierarchy from the taxonomy's presentation
+and calculation linkbases — the Markdown carries docling's
+`<!-- missing-key-value-item -->` placeholder there). The taxonomy is read
+offline from `--xbrl-taxonomy DIR` (`xbrl_taxonomy` on the other surfaces,
+docling's `XBRLBackendOptions.taxonomy`): the extension schema and linkbases
+at the relative paths the instance's `schemaRef` names, plus taxonomy
+packages (`.zip` with a `META-INF/catalog.xml`) mapping the base taxonomies'
+URLs to files. Without the option the instance's own directory is searched;
+whatever cannot be found only costs the graph its hierarchy links.
+
 <details>
 <summary><b>Installing ffmpeg</b> (optional — only for video frame sampling)</summary>
 
@@ -270,7 +285,7 @@ Options per request: `to=md|json|dclx|chunks|latex|images`, `strict`, `images=pl
 [enrichment models](#enrichment-models-picture-classification-code-formulas), named as
 docling's `PdfPipelineOptions` flags; a request that changes the enrichment mix rebuilds the
 warm pipeline once, the models themselves load lazily on the first matching region),
-`ocr_lang`, `ocr_engine`, `ocr_mode`, `ocr_scale`, `scale`, `asr_model`, `asr_lang`, `encoding`, `video_frames`, `fetch_images`,
+`ocr_lang`, `ocr_engine`, `ocr_mode`, `ocr_scale`, `scale`, `asr_model`, `asr_lang`, `encoding`, `video_frames`, `xbrl_taxonomy`, `fetch_images`,
 `chunker=hierarchical|hybrid`, `chunk_tokenizer`, `chunk_max_tokens`, `chunk_merge_peers` (#256:
 per-request `to=chunks` configuration; the tokenizer is a server-local relative path),
 `pipeline=standard|vlm` + `vlm_endpoint`, `vlm_model`, `vlm_api_key`, `vlm_prompt`,

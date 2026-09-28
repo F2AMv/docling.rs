@@ -79,6 +79,7 @@ mod webvtt;
 mod wpd;
 mod wps;
 pub(crate) mod xbrl;
+mod xbrl_dts;
 mod xls;
 mod xlsx;
 mod xlsx_drawings;

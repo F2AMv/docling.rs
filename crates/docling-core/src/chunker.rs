@@ -591,6 +591,8 @@ impl Walker<'_> {
                 self.alloc.group();
                 self.walk(children);
             }
+            // A key-value graph holds no text items, so no chunk comes of it.
+            Node::KeyValueGraph { .. } => {}
             Node::FieldRegion { items } => {
                 // Each field part (marker / key / value) is its own text item,
                 // and docling chunks each one individually.

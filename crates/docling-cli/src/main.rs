@@ -11,7 +11,7 @@
 //! optional features the binary carries (execution providers, `serve`,
 //! chunking) — both answer without models present.
 //!
-//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] <input-file>
+//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] <input-file>
 //!   --input GLOB|DIR   batch mode (#205): convert every file the glob matches
 //!                      (`--input '/data/reports/**/*.pdf'` — quote it so the
 //!                      shell doesn't expand it) instead of one positional file.
@@ -74,6 +74,13 @@
 //!   --video-frames N   Max frames sampled from a video input as timestamped
 //!                      pictures (needs the ffmpeg binary; 0 = transcript
 //!                      only). Default 8.
+//!   --xbrl-taxonomy DIR
+//!                      Directory holding an XBRL instance's taxonomy — its
+//!                      schema and linkbases at the paths the instance's
+//!                      schemaRef names, plus taxonomy packages (.zip with
+//!                      META-INF/catalog.xml) mapping the base taxonomies'
+//!                      URLs for offline use (docling's XBRLBackendOptions
+//!                      .taxonomy). Default: the instance's own directory.
 //!   --asr-model NAME   Whisper preset for audio inputs: whisper_tiny_en,
 //!                      whisper_base_en, whisper_small_en, whisper_distil_small_en
 //!                      (models under .models/asr/<preset>/; fetch them with
@@ -240,6 +247,8 @@ AUDIO / VIDEO
   --asr-model PRESET      Whisper preset for audio/video transcription
   --asr-lang CODE         force a transcription language
   --video-frames N        sample N key frames from a video
+  --xbrl-taxonomy DIR     taxonomy directory for XBRL instances (default: the
+                          instance's own directory)
 
 OTHER
   -h, --help              print this help
@@ -314,6 +323,7 @@ fn main() -> ExitCode {
     let mut asr_lang: Option<String> = None;
     let mut encoding: Option<String> = None;
     let mut video_frames: Option<usize> = None;
+    let mut xbrl_taxonomy: Option<std::path::PathBuf> = None;
     let mut enrich_picture_classes = false;
     let mut enrich_code = false;
     let mut enrich_formula = false;
@@ -430,6 +440,15 @@ fn main() -> ExitCode {
                 Some(Ok(n)) => video_frames = Some(n),
                 _ => {
                     eprintln!("error: --video-frames needs a non-negative integer");
+                    return ExitCode::from(2);
+                }
+            },
+            "--xbrl-taxonomy" => match args.next() {
+                Some(dir) if !dir.trim().is_empty() => {
+                    xbrl_taxonomy = Some(std::path::PathBuf::from(dir))
+                }
+                _ => {
+                    eprintln!("error: --xbrl-taxonomy needs a directory");
                     return ExitCode::from(2);
                 }
             },
@@ -716,6 +735,7 @@ fn main() -> ExitCode {
             asr_lang,
             encoding,
             video_frames,
+            xbrl_taxonomy: xbrl_taxonomy.clone(),
             pages,
             ocr_lang,
             ocr_mode,
@@ -844,6 +864,9 @@ fn main() -> ExitCode {
         .do_formula_enrichment(enrich_formula);
     if let Some(max) = video_frames {
         converter = converter.video_frames(max);
+    }
+    if let Some(dir) = xbrl_taxonomy {
+        converter = converter.xbrl_taxonomy(dir);
     }
     if let Some((first, last)) = pages {
         converter = converter.page_range(first, last);
@@ -1039,6 +1062,7 @@ struct BatchCfg {
     asr_lang: Option<String>,
     encoding: Option<String>,
     video_frames: Option<usize>,
+    xbrl_taxonomy: Option<std::path::PathBuf>,
     pages: Option<(usize, usize)>,
     ocr_lang: Option<String>,
     /// Which regions feed the OCR (docling's `OcrMode`, #254).
@@ -1168,6 +1192,9 @@ fn batch_converter(cfg: &BatchCfg) -> DocumentConverter {
         .do_formula_enrichment(cfg.enrich_formula);
     if let Some(max) = cfg.video_frames {
         converter = converter.video_frames(max);
+    }
+    if let Some(dir) = &cfg.xbrl_taxonomy {
+        converter = converter.xbrl_taxonomy(dir.clone());
     }
     if let Some((first, last)) = cfg.pages {
         converter = converter.page_range(first, last);

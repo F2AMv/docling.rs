@@ -74,6 +74,10 @@
 //! - `ebcdic_layout` — EBCDIC (#252): the copybook layout as inline
 //!   `EbcdicLayout` JSON (mandatory for the format — the bytes are
 //!   meaningless without it)
+//! - `xbrl_taxonomy` — XBRL (#466): a server-local relative directory holding
+//!   the instance's taxonomy (extension schema and linkbases, taxonomy
+//!   packages), docling's `XBRLBackendOptions.taxonomy`; without it the fact
+//!   graph has no presentation/calculation hierarchy
 //! - `chunker`, `chunk_tokenizer`, `chunk_max_tokens`, `chunk_merge_peers` —
 //!   per-request `to=chunks` configuration (#256, mirroring docling's
 //!   service-datamodel `ChunkerType`/`HybridChunkerOptions`): pick one
@@ -473,6 +477,11 @@ struct ConvertOptions {
     /// Max frames sampled from a video input (0 = transcript only; needs the
     /// server to have the ffmpeg binary).
     video_frames: Option<usize>,
+    /// XBRL: the server-local directory holding the instance's taxonomy
+    /// (docling's `XBRLBackendOptions.taxonomy`), a relative path without
+    /// `..` like `chunk_tokenizer`; unset = no taxonomy beyond the instance
+    /// itself (an upload has no directory of its own).
+    xbrl_taxonomy: Option<String>,
     /// PDF page window, `"A-B"` or a single `"N"` (1-based inclusive — #80).
     pages: Option<String>,
     /// OCR recognition language for scanned pages: `en` (default) | `ch`.
@@ -556,6 +565,7 @@ impl ConvertOptions {
             asr_lang: self.asr_lang.or(base.asr_lang),
             encoding: self.encoding.or(base.encoding),
             video_frames: self.video_frames.or(base.video_frames),
+            xbrl_taxonomy: self.xbrl_taxonomy.or(base.xbrl_taxonomy),
             pages: self.pages.or(base.pages),
             ocr_lang: self.ocr_lang.or(base.ocr_lang),
             ocr_mode: self.ocr_mode.or(base.ocr_mode),
@@ -1861,6 +1871,7 @@ async fn read_multipart(
             }
             "chunker" => body_opts.chunker = Some(text_field(field).await?),
             "chunk_tokenizer" => body_opts.chunk_tokenizer = Some(text_field(field).await?),
+            "xbrl_taxonomy" => body_opts.xbrl_taxonomy = Some(text_field(field).await?),
             "chunk_max_tokens" => {
                 let v = text_field(field).await?;
                 body_opts.chunk_max_tokens = Some(v.parse().map_err(|_| {
@@ -2455,6 +2466,23 @@ fn request_converter(
     }
     if let Some(s) = parse_ocr_scale(options.ocr_scale)? {
         converter = converter.ocr_scale(s);
+    }
+    // A server-local directory, held to the same rule as `chunk_tokenizer`:
+    // relative, no `..` — a request must not name arbitrary server paths.
+    if let Some(dir) = options.xbrl_taxonomy.as_deref() {
+        let path = std::path::Path::new(dir);
+        let unsafe_component = path.components().any(|c| {
+            !matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        });
+        if unsafe_component || dir.is_empty() {
+            return Err(ApiError::Bad(format!(
+                "xbrl_taxonomy must be a relative path without '..' components, got {dir:?}"
+            )));
+        }
+        converter = converter.xbrl_taxonomy(path);
     }
     Ok(converter)
 }

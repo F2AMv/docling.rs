@@ -521,6 +521,8 @@ fn render_one(node: &Node, list_level: usize, inline: bool, parts: &mut Vec<Stri
             }
         }
         Node::FieldRegion { items } => render_field_region(items, parts),
+        // A key-value graph has no LaTeX rendering (docling's serializer skips it).
+        Node::KeyValueGraph { .. } => {}
         Node::InlineGroup { md_text, .. } => push(parts, inline_md(md_text)),
         Node::TextDump(text) => push(parts, text_item(text)),
         // Notes-layer comments are omitted; an annotated item renders itself.

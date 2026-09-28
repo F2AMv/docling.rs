@@ -114,8 +114,20 @@ fn declared_encoding(bytes: &[u8]) -> Option<String> {
 }
 
 pub(crate) fn convert_html(name: &str, html: &str, images: &dyn ImageResolver) -> DoclingDocument {
+    convert_html_with(name, html, images, true)
+}
+
+/// [`convert_html`] with docling's `infer_furniture` option: `false` keeps
+/// everything on the body layer, however late the first heading comes — how
+/// the XBRL backend converts a filing's HTML text blocks.
+pub(crate) fn convert_html_with(
+    name: &str,
+    html: &str,
+    images: &dyn ImageResolver,
+    infer_furniture: bool,
+) -> DoclingDocument {
     let mut doc = DoclingDocument::new(name);
-    append_fragment(html, &mut doc.nodes, images);
+    append_fragment_with(html, &mut doc.nodes, images, infer_furniture);
     // The flat nodes above drive Markdown / DocLang / LaTeX; the JSON export
     // takes docling's item tree, built by a call-for-call port of upstream's
     // walk ([`super::html_tree`]) so the JSON structure — heading nesting,
@@ -124,7 +136,11 @@ pub(crate) fn convert_html(name: &str, html: &str, images: &dyn ImageResolver) -
     if nesting_estimate_within(html, max_dom_depth()) {
         let parsed = Html::parse_document(html);
         if within_depth_limit(parsed.root_element(), MAX_DOM_DEPTH) {
-            doc.tree = Some(super::html_tree::build_tree(&parsed, images));
+            doc.tree = Some(super::html_tree::build_tree(
+                &parsed,
+                images,
+                infer_furniture,
+            ));
         }
     }
     doc
@@ -134,6 +150,17 @@ pub(crate) fn convert_html(name: &str, html: &str, images: &dyn ImageResolver) -
 /// Markdown backend, which feeds embedded raw-HTML blocks through here (as
 /// docling does).
 pub(crate) fn append_fragment(html: &str, out: &mut Vec<Node>, images: &dyn ImageResolver) {
+    append_fragment_with(html, out, images, true);
+}
+
+/// [`append_fragment`] with docling's `infer_furniture` option (see
+/// [`convert_html_with`]).
+fn append_fragment_with(
+    html: &str,
+    out: &mut Vec<Node>,
+    images: &dyn ImageResolver,
+    infer_furniture: bool,
+) {
     // html5ever's tree builder walks its stack of open elements per tag, so
     // a page nested tens of thousands of elements deep parses in quadratic
     // time — 100 000 nested `<div>`s (1 MB) took 37 s before a single node
@@ -194,7 +221,9 @@ pub(crate) fn append_fragment(html: &str, out: &mut Vec<Node>, images: &dyn Imag
     }
     // docling's `infer_furniture`: content before the first body heading is site
     // chrome (navigation/menus/sidebars) → the `furniture` layer.
-    mark_leading_furniture(&mut out[start..]);
+    if infer_furniture {
+        mark_leading_furniture(&mut out[start..]);
+    }
 }
 
 /// The first hyperlink target inside `el` (its own `<a href>` or a descendant),
@@ -1494,6 +1523,9 @@ impl RunBuf {
         } else {
             let before = self.rich.len();
             self.push_rich(fmt.to_inline_run(text));
+            if self.rich.len() == before {
+                self.fold_markdown_over_break(fmt);
+            }
             self.unmerged_runs += usize::from(self.rich.len() > before);
             // Folded into the previous run across a `<br>`: that run's text is
             // now two segments, so nothing later merges into it.
@@ -1506,6 +1538,24 @@ impl RunBuf {
                 )
             });
         }
+    }
+
+    /// The Markdown side of a `<br>` fold ([`Self::push_rich`] just joined the
+    /// segment onto the previous run as `a\nb`): docling wraps that one text
+    /// item as a whole, so `<b>a<br>b</b>` is `**a\nb**` — which a table cell
+    /// flattens to `**a b**` — and not `**a**` newline `**b**`. The md stream
+    /// holds `[…, "**a**", ␤, "**b**"]` here; a run of two or more sentinels
+    /// is a paragraph break and is left alone.
+    fn fold_markdown_over_break(&mut self, fmt: Fmt) {
+        let n = self.md.len();
+        if n < 3 || self.md[n - 2] != BR_SENTINEL || (n >= 4 && self.md[n - 4] == BR_SENTINEL) {
+            return;
+        }
+        let Some(folded) = self.rich.last().map(|r| r.text.clone()) else {
+            return;
+        };
+        self.md.truncate(n - 2);
+        self.md[n - 3] = serialize_run(&folded, fmt, None);
     }
 
     /// Append a text segment as a structured run, folding it into the previous

@@ -1,14 +1,14 @@
 //! The top-level `DocumentConverter`.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use crate::backend::{
     is_deepseek_markdown, AbwBackend, AsciiDocBackend, CsvBackend, DeclarativeBackend,
     DeepSeekBackend, DocBackend, DoclingJsonBackend, DocxBackend, EbcdicBackend, EmailBackend,
     EpubBackend, InterchangeBackend, JatsBackend, LatexBackend, LotusBackend, MarkdownBackend,
     MhtmlBackend, PptBackend, PptxBackend, QuattroBackend, RtfBackend, StarOffice5Backend,
-    UsptoBackend, VisioBackend, WebVttBackend, WpdBackend, WpsBackend, XbrlBackend, XlsBackend,
-    XlsxBackend,
+    UsptoBackend, VisioBackend, WebVttBackend, WpdBackend, WpsBackend, XlsBackend, XlsxBackend,
 };
 
 /// Whether `text` begins with an XML prolog — an `<?xml …?>` declaration or a
@@ -132,6 +132,9 @@ pub struct DocumentConverter {
     /// Max sampled frames per video (#138 Phase 2). `None` = the default
     /// ([`DEFAULT_VIDEO_FRAMES`]); `Some(0)` disables frame extraction.
     video_frames: Option<usize>,
+    /// The directory an XBRL instance's taxonomy is read from (docling's
+    /// `XBRLBackendOptions.taxonomy`); `None` = the instance's own directory.
+    xbrl_taxonomy: Option<PathBuf>,
     /// Opt-in PDF/image enrichment models (docling's
     /// `do_picture_classification` / `do_code_enrichment` /
     /// `do_formula_enrichment`).
@@ -205,6 +208,7 @@ impl Default for DocumentConverter {
             asr_model: None,
             asr_lang: None,
             video_frames: None,
+            xbrl_taxonomy: None,
             enrich: crate::EnrichmentOptions::default(),
             page_range: None,
             ocr_lang: None,
@@ -443,6 +447,19 @@ impl DocumentConverter {
     /// without it a video converts to its transcript alone.
     pub fn video_frames(mut self, max: usize) -> Self {
         self.video_frames = Some(max);
+        self
+    }
+
+    /// The folder holding the taxonomy an XBRL instance refers to (docling's
+    /// `XBRLBackendOptions.taxonomy`): the filing's extension schema and
+    /// linkbases at the relative paths its `link:schemaRef` names, plus any
+    /// taxonomy packages (`.zip` with a `META-INF/catalog.xml`) that map the
+    /// base taxonomies' `http(s)` URLs to files for offline use. Without it the
+    /// instance's own directory is searched. Nothing is fetched remotely; a
+    /// document that cannot be found only costs the fact graph the hierarchy
+    /// it would have contributed.
+    pub fn xbrl_taxonomy(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.xbrl_taxonomy = Some(dir.into());
         self
     }
 
@@ -846,7 +863,9 @@ impl DocumentConverter {
             // backends by content, mirroring docling's content-based detection.
             InputFormat::Md if looks_like_xml(&source.text()?) => match sniff_xml(&source.bytes) {
                 InputFormat::XmlUspto => UsptoBackend.convert(&source)?,
-                InputFormat::XmlXbrl => XbrlBackend.convert(&source)?,
+                InputFormat::XmlXbrl => {
+                    crate::backend::xbrl::convert_xbrl(&source, self.xbrl_taxonomy.as_deref())?
+                }
                 // docling's format detection reads an XML-looking `.txt` as
                 // `application/xml` and, when its DOCTYPE names a JATS DTD
                 // (`JATS-journalpublishing…` / `JATS-archive…`), converts it
@@ -963,7 +982,9 @@ impl DocumentConverter {
             InputFormat::XmlJats | InputFormat::XmlUspto | InputFormat::XmlXbrl => {
                 match sniff_xml(&source.bytes) {
                     InputFormat::XmlUspto => UsptoBackend.convert(&source)?,
-                    InputFormat::XmlXbrl => XbrlBackend.convert(&source)?,
+                    InputFormat::XmlXbrl => {
+                        crate::backend::xbrl::convert_xbrl(&source, self.xbrl_taxonomy.as_deref())?
+                    }
                     _ => JatsBackend {
                         fetch_images: self.fetch_images,
                     }

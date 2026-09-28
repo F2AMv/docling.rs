@@ -160,16 +160,29 @@ impl DeclarativeBackend for MarkdownBackend {
         // escape leaves an offset gap (the backslash). marko keeps `[11]` as one
         // run yet treats the escaped `.` as a separate run — so merging the
         // contiguous pieces and leaving gapped ones split reproduces both.
+        // Inside a table the gap rule does not apply: docling rebuilds a cell
+        // from the raw source line (`_close_table` splits it on `|`), so a
+        // backslash-escaped `\|` — or any other escape — is cell content with
+        // nothing around it (docling#4313: `a\|b` is the cell `a|b`).
         let raw: Vec<(Event, std::ops::Range<usize>)> =
             Parser::new_ext(text, opts).into_offset_iter().collect();
         let mut events: Vec<Event> = Vec::with_capacity(raw.len());
         let mut k = 0;
+        let mut in_table = false;
         while k < raw.len() {
+            match &raw[k].0 {
+                Event::Start(Tag::Table(_)) => in_table = true,
+                Event::End(TagEnd::Table) => in_table = false,
+                _ => {}
+            }
             if matches!(raw[k].0, Event::Text(_)) {
                 let mut merged = String::new();
                 let mut end = raw[k].1.start;
                 while let Some((Event::Text(t), range)) = raw.get(k) {
-                    if range.start != end {
+                    let escape_gap = in_table
+                        && range.start == end + 1
+                        && text.as_bytes().get(end) == Some(&b'\\');
+                    if range.start != end && !escape_gap {
                         break;
                     }
                     merged.push_str(t);
@@ -528,17 +541,33 @@ impl MarkdownBackend {
     /// `2 .` while a contiguous `[11]` stays `[11]`.
     fn collect_inline(&self, events: &[Event], i: &mut usize, table: bool) -> Vec<String> {
         let mut runs: Vec<String> = Vec::new();
+        // docling#4019 (2.126): a line break inside a paragraph, heading or
+        // list item is kept. A hard break joins the runs around it with `\n`
+        // (GFM `  \n` once serialized), a soft one with a space; two runs of
+        // the same formatting merge into one item across the break
+        // (`**Bold A**` ⏎ `**Bold B**` → `**Bold A Bold B**`), differently
+        // formatted ones stay separate items, the second carrying the `\n`.
+        let mut pending: Option<Break> = None;
         while *i < events.len() {
             match &events[*i] {
                 Event::Text(t) => {
+                    let before = runs.len();
                     self.push_text(t, table, &mut runs);
+                    if runs.len() > before {
+                        self.apply_break(&mut runs, pending.take(), table);
+                    }
                     *i += 1;
                 }
                 Event::SoftBreak | Event::HardBreak => {
-                    // The legacy join already inserts a space; strict concatenates,
-                    // so it needs an explicit space here.
-                    if self.strict && !table {
-                        runs.push(" ".to_string());
+                    let hard = matches!(events[*i], Event::HardBreak);
+                    if table {
+                        // A cell is one line: docling reads the raw row, where
+                        // the break is whitespace (the legacy join's space).
+                    } else if self.strict {
+                        // Strict concatenates, so the separator is explicit.
+                        runs.push(if hard { "\n" } else { " " }.to_string());
+                    } else {
+                        pending = Some(if hard { Break::Hard } else { Break::Soft });
                     }
                     *i += 1;
                 }
@@ -561,10 +590,17 @@ impl MarkdownBackend {
                     });
                     *i += 1;
                 }
-                Event::Start(Tag::Emphasis) => runs.push(self.wrap_inline(events, i, table, "*")),
-                Event::Start(Tag::Strong) => runs.push(self.wrap_inline(events, i, table, "**")),
+                Event::Start(Tag::Emphasis) => {
+                    runs.push(self.wrap_inline(events, i, table, "*"));
+                    self.apply_break(&mut runs, pending.take(), table);
+                }
+                Event::Start(Tag::Strong) => {
+                    runs.push(self.wrap_inline(events, i, table, "**"));
+                    self.apply_break(&mut runs, pending.take(), table);
+                }
                 Event::Start(Tag::Strikethrough) => {
-                    runs.push(self.wrap_inline(events, i, table, "~~"))
+                    runs.push(self.wrap_inline(events, i, table, "~~"));
+                    self.apply_break(&mut runs, pending.take(), table);
                 }
                 Event::Start(Tag::Link { dest_url, .. }) => {
                     let url = dest_url.to_string();
@@ -592,6 +628,49 @@ impl MarkdownBackend {
             }
         }
         runs
+    }
+
+    /// Resolve a pending line break once the run after it has been pushed
+    /// (legacy, non-table): the last two runs merge when they share their
+    /// formatting — both plain, or both wrapped in the same marker — with
+    /// `\n` (hard) or a space (soft) between their texts; otherwise a hard
+    /// break prefixes the new run with `\n` and a soft one is the join's space.
+    fn apply_break(&self, runs: &mut Vec<String>, pending: Option<Break>, table: bool) {
+        let Some(brk) = pending else {
+            return;
+        };
+        if table || self.strict || runs.len() < 2 {
+            return;
+        }
+        let new = runs.pop().expect("two runs");
+        let prev = runs.pop().expect("two runs");
+        let sep = match brk {
+            Break::Hard => "\n",
+            Break::Soft => " ",
+        };
+        let marker_of = |r: &str| -> Option<&'static str> {
+            ["**", "~~", "*"]
+                .into_iter()
+                .find(|m| r.len() > 2 * m.len() && r.starts_with(m) && r.ends_with(m))
+        };
+        let plain = |r: &str| !r.starts_with(['*', '~', '`', '[', '!']);
+        match (marker_of(&prev), marker_of(&new)) {
+            (None, None) if plain(&prev) && plain(&new) => {
+                runs.push(format!("{prev}{sep}{new}"));
+            }
+            (Some(m), Some(n)) if m == n => {
+                let inner_prev = &prev[m.len()..prev.len() - m.len()];
+                let inner_new = &new[m.len()..new.len() - m.len()];
+                runs.push(format!("{m}{inner_prev}{sep}{inner_new}{m}"));
+            }
+            _ => {
+                runs.push(prev);
+                runs.push(match brk {
+                    Break::Hard => format!("\n{new}"),
+                    Break::Soft => new,
+                });
+            }
+        }
     }
 
     fn wrap_inline(&self, events: &[Event], i: &mut usize, table: bool, marker: &str) -> String {
@@ -674,6 +753,13 @@ fn consume_end(events: &[Event], i: &mut usize) {
     if matches!(events.get(*i), Some(Event::End(_))) {
         *i += 1;
     }
+}
+
+/// A line break waiting for the run that follows it (see `collect_inline`).
+#[derive(Clone, Copy)]
+enum Break {
+    Soft,
+    Hard,
 }
 
 fn is_inline_start(event: &Event) -> bool {

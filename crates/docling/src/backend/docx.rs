@@ -107,6 +107,18 @@ impl DeclarativeBackend for DocxBackend {
         // page (`<w:titlePg/>`), which also switches both to the first-page
         // parts.
         add_header_footer(&mut pkg, body, &ctx, &mut doc);
+        // Footnote / endnote bodies follow as furniture too (docling#4374):
+        // a `w:footnoteReference` in the body carries no text of its own, so
+        // without reading `word/footnotes.xml` / `word/endnotes.xml` the
+        // notes were silently dropped.
+        for text in footnote_texts(&mut pkg) {
+            doc.nodes.push(Node::Furniture {
+                layer: docling_core::ContentLayer::Furniture,
+                inner: Box::new(Node::Paragraph {
+                    text: super::markdown::escape_html(&super::markdown::escape_underscores(&text)),
+                }),
+            });
+        }
         // Reviewer comments (docling's `notes` layer) are appended after the
         // body as `comment_section` groups: Markdown/LaTeX drop them, JSON
         // emits the group plus its notes text (and the `comments` back-refs on
@@ -200,6 +212,54 @@ pub(super) fn header_footer_parts(body: XmlNode, ctx: &Ctx) -> Vec<(&'static str
                     "page footer"
                 };
                 out.push((name, part.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// The body text of every footnote and endnote, in part order (footnotes,
+/// then endnotes) and document order — docling's `_add_footnotes_and_endnotes`
+/// (docling#4374): the parts are reached through the document's FOOTNOTES /
+/// ENDNOTES relationships, the `separator` / `continuationSeparator` /
+/// `continuationNotice` placeholders Word writes into every document are
+/// skipped, and a note's non-blank paragraphs (python-docx's `Paragraph.text`)
+/// are joined with one space. Each becomes a furniture-layer `footnote` item.
+pub(super) fn footnote_texts(pkg: &mut Package) -> Vec<String> {
+    const SKIP_TYPES: [&str; 3] = ["separator", "continuationSeparator", "continuationNotice"];
+    let mut out = Vec::new();
+    for (rel_suffix, tag) in [("/footnotes", "footnote"), ("/endnotes", "endnote")] {
+        let Some(part) = pkg
+            .rels_for("word/document.xml")
+            .into_iter()
+            .find(|r| r.rel_type.ends_with(rel_suffix))
+            .map(|r| super::ooxml::resolve("word", &r.target))
+        else {
+            continue;
+        };
+        let Some(xml) = pkg.read(&part) else {
+            continue;
+        };
+        let Ok(dom) = Document::parse(&xml) else {
+            eprintln!("docling: failed to parse {tag}s part");
+            continue;
+        };
+        for note in dom
+            .root_element()
+            .children()
+            .filter(|n| n.has_tag_name(tag))
+        {
+            if attr(note, "type").is_some_and(|t| SKIP_TYPES.contains(&t)) {
+                continue;
+            }
+            let texts: Vec<String> = note
+                .children()
+                .filter(|n| n.has_tag_name("p"))
+                .map(|p| plain_paragraph_text(p).trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if !texts.is_empty() {
+                out.push(texts.join(" "));
             }
         }
     }
@@ -755,22 +815,37 @@ fn handle_paragraph_inner(
                     layer: None,
                 });
             } else {
-                // A multilevel marker (`1.1.`) is a Markdown bullet with the
-                // marker kept as a text prefix (`- 1.1. text`), but an ordered
-                // DocLang item with a clean-text `<marker>` — carried in `dclx`.
+                // Any other marker is an ordered DocLang item with a clean-text
+                // `<marker>` — carried in `dclx` — and renders in Markdown by
+                // docling-core's rules (`ensure_valid_list_item_marker` with
+                // `orig_list_item_marker_mode=AUTO`): a marker of Unicode
+                // digits and a dot (`１.`, docling#4336) is already valid and
+                // prints verbatim; one holding an ASCII letter or digit
+                // (`1.1.`, `a)`) is kept as a text prefix behind the bullet
+                // (`- 1.1. text`); one without any (`第九条`, `甲.`, `①`) is
+                // dropped and the item is a plain bullet.
                 let dclx = Some(ListItemDclx {
                     ordered: true,
                     marker: Some(marker.clone()),
                     text: text.clone(),
                     runs: Vec::new(),
                 });
+                let already_valid = cached_regex!(r"^\d+\.$").is_match(&marker);
+                let ascii_alnum = marker.bytes().any(|b| b.is_ascii_alphanumeric());
+                let (ordered, marker, text) = if already_valid {
+                    (true, Some(marker), text)
+                } else if ascii_alnum {
+                    (false, None, format!("{marker} {text}"))
+                } else {
+                    (false, None, text)
+                };
                 doc.push(Node::ListItem {
-                    ordered: false,
+                    ordered,
                     number,
                     first_in_list,
-                    text: format!("{marker} {text}"),
+                    text,
                     level,
-                    marker: None,
+                    marker,
                     location: None,
                     dclx,
                     href: None,
@@ -2258,7 +2333,222 @@ const VISIBLE_NUMBERING_FORMATS: &[&str] = &[
     "lowerLetter",
     "upperLetter",
     "decimalZero",
+    // East Asian formats (docling#4336): rendered by `cjk_counter`.
+    "chineseCounting",
+    "chineseCountingThousand",
+    "chineseLegalSimplified",
+    "ideographDigital",
+    "ideographTraditional",
+    "ideographZodiac",
+    "japaneseCounting",
+    "decimalFullWidth",
+    "decimalEnclosedCircle",
 ];
+
+// East Asian numFmt rendering (docling#4336). Character sets follow
+// ECMA-376-1:2016 §17.18.59 (ST_NumberFormat); where the standard's prose and
+// its examples disagree, or are silent, the rules follow the markers Microsoft
+// Word 16.112 renders, as noted on each helper.
+const CJK_DIGITS: [char; 9] = ['一', '二', '三', '四', '五', '六', '七', '八', '九'];
+const CHINESE_LEGAL_DIGITS: [char; 9] = ['壹', '贰', '叁', '肆', '伍', '陆', '柒', '捌', '玖'];
+const HEAVENLY_STEMS: [char; 10] = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'];
+const EARTHLY_BRANCHES: [char; 12] = [
+    '子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥',
+];
+/// Word renders an empty marker from this value on ([MS-OI29500] 2.1.548 j).
+const CJK_GROUPED_NUMBER_LIMIT: i64 = 1_000_000;
+
+/// Each decimal digit of `value` written with `zero` for 0 and `digits[d-1]`
+/// otherwise (`_int_to_positional_marker`).
+fn positional_marker(value: i64, zero: char, digits: &[char; 9]) -> String {
+    if value < 0 {
+        return value.to_string();
+    }
+    value
+        .to_string()
+        .bytes()
+        .map(|b| match b - b'0' {
+            0 => zero,
+            d => digits[usize::from(d) - 1],
+        })
+        .collect()
+}
+
+/// 1..=len(symbols) map to one symbol each; other values stay decimal
+/// (`_int_to_sequence_marker` — ECMA-376's fallback, which Word renders too).
+fn sequence_marker(value: i64, symbols: &[char]) -> String {
+    match usize::try_from(value) {
+        Ok(v) if (1..=symbols.len()).contains(&v) => symbols[v - 1].to_string(),
+        _ => value.to_string(),
+    }
+}
+
+/// 1..999,999 with Chinese unit characters (`_int_to_chinese_grouped_marker`):
+/// every non-zero digit is followed by its unit, the ten-thousands group is
+/// closed by `myriad`, and one `zero` is written for each run of zero digits
+/// that is followed by a non-zero digit: 101 → 一百〇一, 100010 → 一十万〇一十.
+/// This matches Word ([MS-OI29500] 2.1.548 e says Word omits the zero for
+/// 10,000–100,000; it does not).
+fn chinese_grouped_marker(
+    value: i64,
+    digits: &[char; 9],
+    units: [&str; 4],
+    myriad: &str,
+    zero: char,
+) -> String {
+    let text = value.to_string();
+    let mut parts = String::new();
+    let mut pending_zero = false;
+    for (power, b) in (0..text.len()).rev().zip(text.bytes()) {
+        let digit = usize::from(b - b'0');
+        if digit == 0 {
+            pending_zero = !parts.is_empty();
+        } else {
+            if pending_zero {
+                parts.push(zero);
+                pending_zero = false;
+            }
+            parts.push(digits[digit - 1]);
+            parts.push_str(units[power % 4]);
+        }
+        if power == 4 {
+            parts.push_str(myriad);
+        }
+    }
+    parts
+}
+
+/// `chineseCounting`: 十 and 二十一 up to 99, then digit by digit with U+25CB as
+/// zero (ECMA-376's pattern, which Word renders too).
+fn chinese_counting_marker(value: i64) -> String {
+    if value < 0 {
+        return value.to_string();
+    }
+    if value >= 100 || value == 0 {
+        return positional_marker(value, '\u{25cb}', &CJK_DIGITS);
+    }
+    let (tens, ones) = (value / 10, value % 10);
+    let mut text = String::new();
+    if tens > 0 {
+        if tens > 1 {
+            text.push(CJK_DIGITS[tens as usize - 1]);
+        }
+        text.push('十');
+    }
+    if ones > 0 {
+        text.push(CJK_DIGITS[ones as usize - 1]);
+    }
+    text
+}
+
+/// `chineseCountingThousand` the way Word does: 10–19 are 十…十九, every other
+/// ten keeps its digit (110 → 一百一十, 100000 → 一十万), U+3007 is the zero
+/// (101 → 一百〇一); from 1,000,000 the marker is empty.
+fn chinese_counting_thousand_marker(value: i64) -> String {
+    match value {
+        v if v < 0 => v.to_string(),
+        0 => "\u{3007}".to_string(),
+        v if v >= CJK_GROUPED_NUMBER_LIMIT => String::new(),
+        10 => "十".to_string(),
+        11..=19 => format!("十{}", CJK_DIGITS[value as usize - 11]),
+        v => chinese_grouped_marker(v, &CJK_DIGITS, ["", "十", "百", "千"], "万", '\u{3007}'),
+    }
+}
+
+/// `chineseLegalSimplified` (壹, 贰, …, 壹拾, 壹佰零壹): ECMA-376's digits and
+/// units, 10 keeps its leading 壹, ten thousand is U+842C as Word renders it;
+/// from 1,000,000 the marker is empty.
+fn chinese_legal_marker(value: i64) -> String {
+    match value {
+        v if v < 0 => v.to_string(),
+        0 => "零".to_string(),
+        v if v >= CJK_GROUPED_NUMBER_LIMIT => String::new(),
+        v => chinese_grouped_marker(v, &CHINESE_LEGAL_DIGITS, ["", "拾", "佰", "仟"], "萬", '零'),
+    }
+}
+
+/// 1..9999 with 千, 百, 十; a digit 1 is omitted before its unit (before 千
+/// only when `explicit_one_thousand` is off).
+fn japanese_counting_group(mut value: i64, explicit_one_thousand: bool) -> String {
+    let mut parts = String::new();
+    for (unit_value, unit) in [(1000, '千'), (100, '百'), (10, '十')] {
+        let digit = value / unit_value;
+        value %= unit_value;
+        if digit == 0 {
+            continue;
+        }
+        if digit > 1 || (unit == '千' && explicit_one_thousand) {
+            parts.push(CJK_DIGITS[digit as usize - 1]);
+        }
+        parts.push(unit);
+    }
+    if value > 0 {
+        parts.push(CJK_DIGITS[value as usize - 1]);
+    }
+    parts
+}
+
+/// `japaneseCounting` (十, 百一, 千百, 一万一千, 十万): no zero character inside
+/// a number, 百 and 十 without a leading 一, 千 without 一 below 10,000 and
+/// 一千 after a 万 group — Word's rendering; from 1,000,000 the marker is empty.
+fn japanese_counting_marker(value: i64) -> String {
+    if value < 0 {
+        return value.to_string();
+    }
+    if value == 0 {
+        return "\u{3007}".to_string();
+    }
+    if value >= CJK_GROUPED_NUMBER_LIMIT {
+        return String::new();
+    }
+    let (myriads, rest) = (value / 10_000, value % 10_000);
+    let mut text = String::new();
+    if myriads > 0 {
+        if myriads == 1 {
+            text.push(CJK_DIGITS[0]);
+        } else {
+            text.push_str(&japanese_counting_group(myriads, false));
+        }
+        text.push('万');
+    }
+    if rest > 0 {
+        text.push_str(&japanese_counting_group(rest, myriads > 0));
+    }
+    text
+}
+
+/// docling's `_CJK_ENUM_FORMATTERS`: the marker for an East Asian `numFmt`,
+/// `None` for any other format.
+fn cjk_counter(counter: i64, num_fmt: &str) -> Option<String> {
+    Some(match num_fmt {
+        "chineseCounting" => chinese_counting_marker(counter),
+        "chineseCountingThousand" => chinese_counting_thousand_marker(counter),
+        "chineseLegalSimplified" => chinese_legal_marker(counter),
+        "ideographDigital" => positional_marker(counter, '\u{3007}', &CJK_DIGITS),
+        "ideographTraditional" => sequence_marker(counter, &HEAVENLY_STEMS),
+        // ECMA-376 lists U+620C (戌), the eleventh Earthly Branch; Word 16.112
+        // renders the adjacent U+620D (戍), which breaks the 子丑寅卯 sequence,
+        // so the standard is kept here on purpose (as upstream does).
+        "ideographZodiac" => sequence_marker(counter, &EARTHLY_BRANCHES),
+        "japaneseCounting" => japanese_counting_marker(counter),
+        "decimalFullWidth" => {
+            if counter < 0 {
+                counter.to_string()
+            } else {
+                counter
+                    .to_string()
+                    .bytes()
+                    .map(|b| char::from_u32(0xFF10 + u32::from(b - b'0')).unwrap_or('?'))
+                    .collect()
+            }
+        }
+        "decimalEnclosedCircle" => {
+            let circles: Vec<char> = (0x2460..0x2474).filter_map(char::from_u32).collect();
+            sequence_marker(counter, &circles)
+        }
+        _ => return None,
+    })
+}
 
 /// Map `(numId, ilvl)` → its level properties, resolved through `numbering.xml`'s
 /// `num` → `abstractNum` → level (`numFmt`, `start`, `lvlText`).
@@ -2342,10 +2632,16 @@ fn is_non_decimal_format(num_fmt: Option<&str>) -> bool {
 }
 
 /// Render a list counter with an OOXML `numFmt` — docling's
-/// `_format_enum_counter`: `lowerLetter`/`upperLetter` run a…z, aa…zz (the
-/// letter repeated), roman numerals, `decimalZero` pads to two digits, and
+/// `_format_enum_counter`: the East Asian formats through [`cjk_counter`]
+/// (docling#4336), `lowerLetter`/`upperLetter` run a…z, aa…zz (the letter
+/// repeated), roman numerals, `decimalZero` pads to two digits, and
 /// everything else (including no format) is the plain decimal.
 fn format_enum_counter(counter: i64, num_fmt: Option<&str>) -> String {
+    if counter >= 0 {
+        if let Some(cjk) = num_fmt.and_then(|f| cjk_counter(counter, f)) {
+            return cjk;
+        }
+    }
     let letter = |v: i64| -> String {
         if v <= 0 {
             return v.to_string();

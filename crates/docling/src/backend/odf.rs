@@ -204,6 +204,7 @@ pub(crate) fn convert_odf(
             match office.tag_name().name() {
                 "text" => {
                     walk_text(office, &styles, &mut doc);
+                    push_note_furniture(office, &mut doc);
                     built = Some(super::odf_tree::build_text(office, &styles));
                 }
                 "spreadsheet" => {
@@ -231,6 +232,7 @@ pub(crate) fn convert_odf(
                 built = Some(super::odf_tree::build_spreadsheet(body, &styles));
             } else {
                 walk_text(body, &styles, &mut doc);
+                push_note_furniture(body, &mut doc);
                 built = Some(super::odf_tree::build_text(body, &styles));
             }
         }
@@ -584,11 +586,52 @@ fn collect_runs_linked(
                 // so skipping the subtree makes both envelopes read the same.
                 // `<office:binary-data>` is an inline image's base64 payload.
                 "object" | "binary-data" => {}
+                // A footnote/endnote's citation marker and body live inside
+                // this element, but neither belongs in the citing sentence's
+                // own text (docling#4375): the body can be arbitrarily long,
+                // and splicing it in here corrupted the reading order. The
+                // body is recovered separately as a furniture item, see
+                // [`note_texts`].
+                "note" => {}
                 // docling's `_odf_text_runs` recurses into every child, so an
                 // image's `<svg:desc>`/`<svg:title>` text is picked up too.
                 _ => collect_runs_linked(child, styles, base, href, out),
             }
         }
+    }
+}
+
+/// The body text of every `<text:note>` below `body`, in document order —
+/// docling's `_add_footnotes` (docling#4375, ODT only): the note body's
+/// `text_content` (its descendant text concatenated), stripped; blank notes
+/// are skipped. Each becomes a furniture-layer `footnote` item, the layer
+/// headers/footers use: available to callers, out of the reading order.
+pub(super) fn note_texts(body: XmlNode) -> Vec<String> {
+    body.descendants()
+        .filter(|n| n.has_tag_name("note"))
+        .filter_map(|note| {
+            let note_body = note.children().find(|c| c.has_tag_name("note-body"))?;
+            let text: String = note_body
+                .descendants()
+                .filter(|n| n.is_text())
+                .filter_map(|n| n.text())
+                .collect::<String>()
+                .trim()
+                .to_string();
+            (!text.is_empty()).then_some(text)
+        })
+        .collect()
+}
+
+/// Footnote/endnote bodies as furniture paragraphs after the body walk.
+fn push_note_furniture(body: XmlNode, doc: &mut DoclingDocument) {
+    for text in note_texts(body) {
+        doc.nodes.push(Node::Furniture {
+            layer: docling_core::ContentLayer::Furniture,
+            inner: Box::new(Node::Paragraph {
+                text: super::markdown::escape_html(&super::markdown::escape_underscores(&text)),
+            }),
+        });
     }
 }
 
@@ -1396,6 +1439,13 @@ fn para_plain_into(el: XmlNode, out: &mut String) {
                 // Inline embedded documents and image payloads (flat ODF) are
                 // not paragraph text.
                 "object" | "binary-data" => {}
+                // A footnote/endnote's citation marker and body live inside
+                // this element, but neither belongs in the citing sentence's
+                // own text (docling#4375): the body can be arbitrarily long,
+                // and splicing it in here corrupted the reading order. The
+                // body is recovered separately as a furniture item, see
+                // [`note_texts`].
+                "note" => {}
                 _ => para_plain_into(child, out),
             }
         }

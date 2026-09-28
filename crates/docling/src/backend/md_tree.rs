@@ -114,20 +114,64 @@ fn parse(text: &str) -> El {
         .collect();
     let mut events: Vec<Event> = Vec::with_capacity(raw.len());
     let mut k = 0;
+    // Where the previous event's source ended: a text event starting one
+    // byte later, behind a backslash, is a resolved escape whose source
+    // range no longer shows the backslash.
+    let mut prev_end = 0usize;
     while k < raw.len() {
         if matches!(raw[k].0, Event::Text(_)) {
             let mut merged = String::new();
             let mut end = raw[k].1.start;
+            let run_escaped =
+                raw[k].1.start == prev_end + 1 && text.as_bytes().get(prev_end) == Some(&b'\\');
+            if run_escaped {
+                // pulldown hands the escaped character over glued to the text
+                // that follows it; marko keeps it as a `Literal` node of its
+                // own, so it is split off here. An escaped `|` is content the
+                // row buffer could not tell from a cell delimiter: like
+                // docling's `_escape_pipes` (docling#4313) it is carried as
+                // `&#124;` and decoded once the cell is split off (or the run
+                // turns out to be text).
+                if let Some((Event::Text(t), range)) = raw.get(k) {
+                    let mut chars = t.chars();
+                    if let Some(first) = chars.next() {
+                        events.push(Event::Text(
+                            if first == '|' {
+                                "&#124;".to_string()
+                            } else {
+                                first.to_string()
+                            }
+                            .into(),
+                        ));
+                        merged.push_str(chars.as_str());
+                        end = range.end;
+                        k += 1;
+                    }
+                }
+            }
             while let Some((Event::Text(t), range)) = raw.get(k) {
                 if range.start != end {
                     break;
                 }
-                merged.push_str(t);
+                // A character reference pulldown resolved (its source is not
+                // its text) spelling a `|` — `&#x7C;`, `&verbar;` — is content
+                // too (docling#4371, `_unescape_except_pipe`): carried encoded
+                // like the escaped pipe above.
+                let reference = text.get(range.clone()).is_some_and(|src| src != &**t);
+                if reference && t.contains('|') {
+                    merged.push_str(&t.replace('|', "&#124;"));
+                } else {
+                    merged.push_str(t);
+                }
                 end = range.end;
                 k += 1;
             }
-            events.push(Event::Text(merged.into()));
+            prev_end = end;
+            if !merged.is_empty() {
+                events.push(Event::Text(merged.into()));
+            }
         } else {
+            prev_end = raw[k].1.end;
             events.push(raw[k].0.clone());
             k += 1;
         }
@@ -294,6 +338,23 @@ fn inline_text(el: &El, out: &mut String) {
 }
 
 /// `_split_table_row`: an empty edge field comes from an edge pipe and is dropped.
+/// docling's `_unescape_except_pipe`: character references decode, except
+/// every spelling of `|`, which stays encoded so it is not taken for a cell
+/// delimiter.
+fn unescape_except_pipe(text: &str) -> String {
+    cached_regex!(r"&#?\w+;")
+        .replace_all(text, |caps: &regex::Captures| {
+            let entity = &caps[0];
+            let decoded = unescape_entities(entity);
+            if decoded == "|" {
+                entity.to_string()
+            } else {
+                decoded
+            }
+        })
+        .into_owned()
+}
+
 fn split_table_row(row: &str) -> Vec<String> {
     let mut cells: Vec<&str> = row.split('|').collect();
     if cells.first().is_some_and(|c| c.trim().is_empty()) {
@@ -681,9 +742,14 @@ impl Walker {
             }
             El::Text(original) => {
                 let mut snippet = unescape_entities(original.trim());
+                // Any spelling of `|` — `\|`, `&#x7c;`, `&verbar;` — stays
+                // encoded while deciding whether the run is a table row
+                // (`_unescape_except_pipe`, docling#4371), so it cannot open
+                // a table or add a column; the cell is unescaped once split.
+                let except_pipe = unescape_except_pipe(original.trim());
                 let is_table_row = !snippet.is_empty()
                     && (self.in_pipeless_table
-                        || (snippet.contains('|')
+                        || (except_pipe.contains('|')
                             && (self.in_table || original.trim_start().starts_with('|'))));
                 if is_table_row {
                     self.in_table = true;

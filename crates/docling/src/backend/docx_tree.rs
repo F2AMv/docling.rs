@@ -33,9 +33,9 @@ use roxmltree::{Document, Node as XmlNode, NodeId};
 
 use super::docx::{
     attr, build_enum_marker, chart_rels, child_elements, clean_checkbox_symbols,
-    detect_code_language, get_list_counter, header_footer_parts, in_textbox, is_code_by_font,
-    is_code_style, is_title_style, numbered_heading_text, on_off, part_rels, row_cells,
-    row_grid_offsets, run_child_text, style_numbering, Ctx, MAX_TABLE_DEPTH,
+    detect_code_language, footnote_texts, get_list_counter, header_footer_parts, in_textbox,
+    is_code_by_font, is_code_style, is_title_style, numbered_heading_text, on_off, part_rels,
+    row_cells, row_grid_offsets, run_child_text, style_numbering, Ctx, MAX_TABLE_DEPTH,
 };
 use super::html_tree::docling_href;
 use super::ooxml::Package;
@@ -76,6 +76,7 @@ struct ListCache {
 struct SavedListCtx {
     history: Vec<Hist>,
     level_at_new_list: Option<i64>,
+    level_start_ilevel: i64,
     parents: Vec<Option<usize>>,
     cache: Option<ListCache>,
 }
@@ -86,6 +87,9 @@ struct Walker {
     parents: Vec<Option<usize>>,
     level: i64,
     level_at_new_list: Option<i64>,
+    /// The `w:ilvl` the current list opened at (docling#4188): a list that
+    /// starts above level 0 still lands at `level_at_new_list`.
+    level_start_ilevel: i64,
     numbered_headers: HashMap<u8, u64>,
     list_counters: HashMap<(String, i64), i64>,
     started_numids: HashSet<String>,
@@ -118,6 +122,15 @@ pub(super) fn build_tree(
     w.walk_linear(body, ctx);
     w.add_header_footer(pkg, body, ctx);
     w.add_comments(comments);
+    // `_add_footnotes_and_endnotes` (docling#4374): after the comments, each
+    // note's body a furniture-layer `footnote` text on the body.
+    for text in footnote_texts(pkg) {
+        w.add(
+            None,
+            Some(ContentLayer::Furniture),
+            text_kind("footnote", &text, None, None),
+        );
+    }
     w.tree
 }
 
@@ -263,6 +276,7 @@ impl Walker {
             parents: vec![None; LEVELS],
             level: 0,
             level_at_new_list: None,
+            level_start_ilevel: 0,
             numbered_headers: HashMap::new(),
             list_counters: HashMap::new(),
             started_numids: HashSet::new(),
@@ -380,20 +394,33 @@ impl Walker {
         refs: &mut Vec<usize>,
     ) -> usize {
         if self.can_reuse_list_group(numid, parent) {
-            // Reusing the group drops the empty text item a blank spacer
-            // paragraph added between the last list item and this one.
-            if let Some(last) = self.tree.last_text() {
-                let blank = match &self.tree.items[last].kind {
-                    TreeKind::Text { text, .. } | TreeKind::Code { text, .. } => {
-                        text.trim().is_empty()
-                    }
-                    _ => false,
-                };
+            // Reuse only if nothing but empty paragraphs (added when the list
+            // was closed) follows the cached group in its parent; otherwise
+            // the new items would land before the intervening content, e.g.
+            // a table (docling#4305). The blanks are dropped on reuse.
+            let group = self.cache.as_ref().map(|c| c.group).unwrap_or(0);
+            let container: Vec<usize> = match parent {
+                Some(p) => self.tree.items[p].children.clone(),
+                None => (0..self.tree.items.len())
+                    .filter(|&i| self.tree.items[i].parent.is_none())
+                    .collect(),
+            };
+            let mut trailing_empty: Vec<usize> = Vec::new();
+            for &id in container.iter().rev() {
+                let blank = matches!(&self.tree.items[id].kind,
+                    TreeKind::Text { text, .. } if text.trim().is_empty());
                 if blank {
-                    self.tree.delete(last);
+                    trailing_empty.push(id);
+                    continue;
                 }
+                if id == group {
+                    for blank in trailing_empty {
+                        self.tree.delete(blank);
+                    }
+                    return group;
+                }
+                break;
             }
-            return self.cache.as_ref().map(|c| c.group).unwrap_or(0);
         }
         let g = self.add(parent, self.layer, group_kind("list", "list"));
         refs.push(g);
@@ -409,6 +436,7 @@ impl Walker {
         let saved = SavedListCtx {
             history: self.history.clone(),
             level_at_new_list: self.level_at_new_list,
+            level_start_ilevel: self.level_start_ilevel,
             parents: self.parents.clone(),
             cache: self.cache.clone(),
         };
@@ -419,6 +447,7 @@ impl Walker {
     fn restore_list_ctx(&mut self, saved: SavedListCtx) {
         self.history = saved.history;
         self.level_at_new_list = saved.level_at_new_list;
+        self.level_start_ilevel = saved.level_start_ilevel;
         self.parents = saved.parents;
         self.cache = saved.cache;
     }
@@ -1729,6 +1758,7 @@ impl Walker {
         if prev_numid.is_none() || (same && self.level_at_new_list.is_none()) {
             // Open a new list.
             self.level_at_new_list = Some(level);
+            self.level_start_ilevel = ilevel;
             self.start_numid(numid);
             let parent = self.parent_at(level - 1);
             let g = self.get_or_create_list_group(numid, parent, &mut refs);
@@ -1740,9 +1770,8 @@ impl Walker {
             && prev_indent.is_some_and(|pi| pi < ilevel)
         {
             // Open an indented list.
-            let lanl = self.level_at_new_list.unwrap_or(0);
             let pi = prev_indent.unwrap_or(0);
-            for i in (lanl + pi + 1)..(lanl + ilevel + 1) {
+            for i in (self.slot_for(pi) + 1)..(self.slot_for(ilevel) + 1) {
                 let g = self.add(
                     self.parent_at(i - 1),
                     self.layer,
@@ -1751,28 +1780,28 @@ impl Walker {
                 self.set_parent(i, Some(g));
                 refs.push(g);
             }
-            use_level = lanl + ilevel;
+            use_level = self.slot_for(ilevel);
         } else if same
             && self.level_at_new_list.is_some()
             && prev_indent.is_some_and(|pi| ilevel < pi)
         {
             // Close list levels.
-            let lanl = self.level_at_new_list.unwrap_or(0);
-            self.clear_parents_from(lanl + ilevel + 1);
-            use_level = lanl + ilevel;
+            self.clear_parents_from(self.slot_for(ilevel) + 1);
+            use_level = self.slot_for(ilevel);
         } else if same && self.is_list_group(self.parent_at(level - 1)) {
             // Continue the existing list.
             use_level = level - 1;
         } else if !same || !self.is_list_group(self.parent_at(level - 1)) {
             // New list sequence.
             match self.level_at_new_list {
-                Some(lanl) => {
-                    use_level = lanl + ilevel;
+                Some(_) => {
+                    use_level = self.slot_for(ilevel);
                     self.clear_parents_from(use_level + 1);
                 }
                 None => {
                     use_level = level;
                     self.level_at_new_list = Some(use_level);
+                    self.level_start_ilevel = ilevel;
                 }
             }
             self.start_numid(numid);
@@ -1784,6 +1813,15 @@ impl Walker {
             use_level = level - 1;
         }
         (refs, use_level)
+    }
+
+    /// `_slot_for` (docling#4188): the parents slot for a Word `w:ilvl`. A
+    /// list that starts at level 0 maps to `level_at_new_list + ilvl`; one
+    /// that starts higher subtracts its start level so its first item lands
+    /// at `level_at_new_list`, and an item shallower than the start level (a
+    /// resumed list returning to level 0) clamps to the list base.
+    fn slot_for(&self, word_ilevel: i64) -> i64 {
+        self.level_at_new_list.unwrap_or(0) + (word_ilevel - self.level_start_ilevel).max(0)
     }
 
     /// Counters reset only the first time a `numId` is opened: a `numId`

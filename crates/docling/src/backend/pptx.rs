@@ -659,28 +659,29 @@ fn handle_shape(shape: XmlNode, ctx: &SlideCtx, out: &mut SlideOut) {
 
 /// docling's `_generate_prov`: the shape's box in EMU — `shape.left/top/
 /// width/height` (its own `<a:xfrm>`, else the placeholder geometry it
-/// inherits), the whole slide when none resolves — handed to
-/// `BoundingBox.from_tuple((l, t, l + w, t + h), origin=BOTTOMLEFT)`, which
-/// reads a bottom-left tuple as `(l, b, r, t)`: the JSON's `b` is the shape's
-/// top EMU and `t` its bottom, tagged `BOTTOMLEFT`. A quirk, kept verbatim.
-/// `charspan` covers `char_len` characters.
+/// inherits), the whole slide when none resolves — as
+/// `BoundingBox.from_tuple((l, t, l + w, t + h), origin=TOPLEFT)`. python-pptx
+/// reports left/top from the slide's top-left corner with y growing downward,
+/// which is what docling#4294 (2.130) tags it as; the box used to be tagged
+/// `BOTTOMLEFT`, which read the tuple as `(l, b, r, t)` and swapped the
+/// vertical edges. `charspan` covers `char_len` characters.
 fn shape_prov(shape: XmlNode, ctx: &SlideCtx, char_len: usize) -> TreeProv {
     let (w, h) = ctx.slide_size;
     let [x, y, cx, cy] = xfrm_geom(shape)
         .or_else(|| inherited_geom(shape, ctx.phmap))
         .unwrap_or([0, 0, w, h]);
-    let (mut l, mut b, mut r, mut t) = (x, y, x + cx, y + cy);
-    // `from_tuple`'s normalization: `l <= r`, and for a bottom-left box `b <= t`.
+    let (mut l, mut t, mut r, mut b) = (x, y, x + cx, y + cy);
+    // `from_tuple`'s normalization: `l <= r`, and for a top-left box `t <= b`.
     if r < l {
         std::mem::swap(&mut l, &mut r);
     }
-    if b > t {
-        std::mem::swap(&mut b, &mut t);
+    if b < t {
+        std::mem::swap(&mut t, &mut b);
     }
     TreeProv {
         page_no: ctx.page_no,
         bbox: [l as f64, t as f64, r as f64, b as f64],
-        bottom_left: true,
+        bottom_left: false,
         charspan: [0, char_len],
     }
 }
@@ -905,10 +906,13 @@ fn handle_text_shape(sp: XmlNode, location: [u16; 4], ctx: &SlideCtx, out: &mut 
         return;
     }
 
-    let mut in_list = false;
-    let mut number = 0u64;
-    // The open `list` group of the tree, while a run of list paragraphs lasts.
-    let mut list_group: Option<usize> = None;
+    // The lists still open while the frame is walked, outermost first —
+    // docling's `_OpenList` stack (docling#4397, 2.130): a paragraph at a
+    // deeper `a:pPr/@lvl` opens a `list` group nested under the last item of
+    // the enclosing list, a shallower one pops back to its level, and every
+    // group numbers its enumerated items on its own counter. A non-list
+    // paragraph closes them all.
+    let mut open_lists: Vec<OpenList> = Vec::new();
     for para in paragraphs {
         let text = paragraph_text(para);
         // docling's `charspan` is over the paragraph's own text, `len()` in
@@ -916,35 +920,36 @@ fn handle_text_shape(sp: XmlNode, location: [u16; 4], ctx: &SlideCtx, out: &mut 
         let prov = shape_prov(sp, ctx, text.chars().count());
         match list_kind(para, Some(tx_body), kind) {
             Some(numbered) => {
-                // docling opens one ListGroup per run of list paragraphs in a
-                // shape (`new_list`, reset by a non-list paragraph): the first
-                // item of the run starts the list, whatever marker kinds follow.
-                let first_in_list = !in_list;
-                if !in_list {
-                    in_list = true;
-                    number = 0;
+                let level = paragraph_level(para);
+                while open_lists.len() > 1 && open_lists.last().is_some_and(|l| l.level > level) {
+                    open_lists.pop();
                 }
+                let first_in_list = open_lists.is_empty();
+                if open_lists.is_empty() {
+                    let group = out.tree.add(Some(out.slide), None, list_group_kind());
+                    open_lists.push(OpenList::new(group, level));
+                } else if open_lists.last().is_some_and(|l| level > l.level) {
+                    // Nested under the enclosing list's last item (falling
+                    // back to its group when that item is still missing).
+                    let parent = open_lists
+                        .last()
+                        .and_then(|l| l.last_item.or(Some(l.group)));
+                    let group = out.tree.add(parent, None, list_group_kind());
+                    open_lists.push(OpenList::new(group, level));
+                }
+                let depth = open_lists.len() - 1;
+                let current = open_lists.last_mut().expect("a list is open");
                 let n = if numbered {
-                    number += 1;
-                    number
+                    current.counter += 1;
+                    current.counter
                 } else {
                     0
                 };
                 // docling passes numbered items an `"N."` enumeration marker
                 // and bulleted ones an empty one.
                 let marker = numbered.then(|| format!("{n}."));
-                let group = *list_group.get_or_insert_with(|| {
-                    out.tree.add(
-                        Some(out.slide),
-                        None,
-                        TreeKind::Group {
-                            label: "list".into(),
-                            name: "list".into(),
-                        },
-                    )
-                });
-                out.tree.add_with_prov(
-                    Some(group),
+                let item = out.tree.add_with_prov(
+                    Some(current.group),
                     None,
                     TreeKind::Text {
                         label: "list_item".into(),
@@ -960,6 +965,7 @@ fn handle_text_shape(sp: XmlNode, location: [u16; 4], ctx: &SlideCtx, out: &mut 
                     },
                     prov,
                 );
+                current.last_item = Some(item);
                 // Each item carries its shape's `<location>` (all items of a
                 // body placeholder share the one box); the location rides on the
                 // item itself so consecutive items still group into one `<list>`.
@@ -968,7 +974,7 @@ fn handle_text_shape(sp: XmlNode, location: [u16; 4], ctx: &SlideCtx, out: &mut 
                     number: n,
                     first_in_list,
                     text,
-                    level: 0,
+                    level: depth as u8,
                     marker,
                     location: Some(location),
                     dclx: None,
@@ -977,8 +983,7 @@ fn handle_text_shape(sp: XmlNode, location: [u16; 4], ctx: &SlideCtx, out: &mut 
                 });
             }
             None => {
-                in_list = false;
-                list_group = None;
+                open_lists.clear();
                 // docling labels a title placeholder's text `title` and any
                 // other non-list text `paragraph` (a `text` in Markdown terms).
                 let label = match kind {
@@ -1000,6 +1005,37 @@ fn handle_text_shape(sp: XmlNode, location: [u16; 4], ctx: &SlideCtx, out: &mut 
                 }
             }
         }
+    }
+}
+
+/// A `list` group still accepting items while a text frame is walked —
+/// docling's `_OpenList`.
+struct OpenList {
+    /// The tree id of the group items at `level` are added to.
+    group: usize,
+    /// The paragraph level (`a:pPr/@lvl`) of the group's items.
+    level: usize,
+    /// Enumerated items added so far — the `N.` counter.
+    counter: u64,
+    /// The most recent item, which parents any list nested below it.
+    last_item: Option<usize>,
+}
+
+impl OpenList {
+    fn new(group: usize, level: usize) -> Self {
+        Self {
+            group,
+            level,
+            counter: 0,
+            last_item: None,
+        }
+    }
+}
+
+fn list_group_kind() -> TreeKind {
+    TreeKind::Group {
+        label: "list".into(),
+        name: "list".into(),
     }
 }
 

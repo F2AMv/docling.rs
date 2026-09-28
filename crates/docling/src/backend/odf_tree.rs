@@ -62,6 +62,23 @@ struct Walker<'s> {
 pub(super) fn build_text(body: XmlNode, styles: &Styles) -> Built {
     let mut w = Walker::new(styles);
     w.add_children(body.children().filter(XmlNode::is_element), None, None);
+    // `_add_footnotes` (docling#4375): each note body a furniture `footnote`
+    // text on the body, after the whole walk.
+    for text in super::odf::note_texts(body) {
+        w.tree.add(
+            None,
+            Some(ContentLayer::Furniture),
+            TreeKind::Text {
+                label: "footnote".into(),
+                text,
+                orig: None,
+                formatting: None,
+                hyperlink: None,
+                level: None,
+                list: None,
+            },
+        );
+    }
     Built {
         tree: w.tree,
         pages: Vec::new(),

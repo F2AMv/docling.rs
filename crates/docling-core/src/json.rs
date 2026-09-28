@@ -2501,9 +2501,9 @@ mod tests {
         assert_eq!(meta["tabular_chart"]["chart_data"]["num_rows"], 2);
     }
 
-    /// A tree item's `TreeProv` is written verbatim — the PPTX backend's raw
-    /// EMU box with its `BOTTOMLEFT` tag and per-item charspan, a note's zero
-    /// `TOPLEFT` box — a picture's `image.dpi` is the file's when the backend
+    /// A tree item's `TreeProv` is written verbatim — a raw EMU box with
+    /// whatever origin tag the backend set (`BOTTOMLEFT` here) and a per-item
+    /// charspan, a note's zero `TOPLEFT` box — a picture's `image.dpi` is the file's when the backend
     /// read one, an item without provenance writes `prov: []`, and the page
     /// map still comes from the flat stream's markers.
     #[test]

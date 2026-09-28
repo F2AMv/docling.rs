@@ -29,7 +29,7 @@ use docling::{
 
 /// Config for a reusable [`DocumentConverter`].
 #[napi(object)]
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ConverterOptions {
     /// Named Whisper model preset for audio sources (English-only /
     /// Distil-Whisper variants under `.models/asr/<preset>/`).
@@ -1130,13 +1130,89 @@ pub struct Pipeline {
     strict: bool,
 }
 
+/// The PDF/image options of a [`ConverterOptions`] resolved into the typed
+/// values the engine's builders take (#471): what `new Pipeline(options)`
+/// primes the warm [`RsPipeline`] with. Validation is the same
+/// `parse_*` set [`DocumentConverter::new`] runs, so the constructor rejects
+/// exactly what the one-shot path rejects instead of quietly running the
+/// process defaults.
+#[derive(Debug, PartialEq)]
+struct WarmPipelineConfig {
+    skip_ocr: bool,
+    force_full_page_ocr: bool,
+    no_text_panels: bool,
+    heading_hierarchy: bool,
+    page_range: Option<(usize, usize)>,
+    ocr_engine: Option<docling::OcrEngine>,
+    /// The PP-OCR recognizer; `None` under Tesseract, whose language list is
+    /// `tesseract_lang` instead (#460).
+    ocr_lang: Option<docling::OcrLang>,
+    /// Tesseract's `-l` argument built from `ocrLang`; `None` under PP-OCR.
+    tesseract_lang: Option<String>,
+    ocr_mode: Option<docling::OcrMode>,
+    ocr_scale: Option<f32>,
+    enrich: docling::EnrichmentOptions,
+}
+
+/// Resolve the PDF/image options for the warm [`Pipeline`] (#471). The
+/// `DocumentConverter` keeps these as the validated strings and lets the
+/// `docling` converter parse them per call; the warm pipeline is built once,
+/// so the strings are parsed into the engine's enums here — the same mapping
+/// `docling::DocumentConverter` applies, including the #460 split of
+/// `ocrLang` into a PP-OCR model under PP-OCR and Tesseract's `-l` list under
+/// Tesseract (against the engine the option selects, else the process's
+/// `DOCLING_RS_OCR_ENGINE` default, exactly as [`parse_ocr_lang`] validates).
+fn warm_pipeline_config(o: &ConverterOptions) -> Result<WarmPipelineConfig> {
+    let ocr_engine = parse_ocr_engine(o.ocr_engine.clone())?
+        .as_deref()
+        .and_then(docling::OcrEngine::parse);
+    let ocr_lang = parse_ocr_lang(o.ocr_lang.clone(), o.ocr_engine.as_deref())?;
+    let engine = ocr_engine.unwrap_or_else(docling::OcrEngine::from_env);
+    let (ocr_lang, tesseract_lang) = match (ocr_lang, engine) {
+        (Some(lang), docling::OcrEngine::Tesseract) => (
+            None,
+            Some(
+                docling::tesseract_lang_arg(&lang)
+                    .map_err(|e| Error::from_reason(format!("ocrLang: {e}")))?,
+            ),
+        ),
+        (Some(lang), docling::OcrEngine::PpOcr) => (docling::OcrLang::parse(&lang), None),
+        (None, _) => (None, None),
+    };
+    Ok(WarmPipelineConfig {
+        skip_ocr: o.skip_ocr.unwrap_or(false),
+        force_full_page_ocr: o.force_full_page_ocr.unwrap_or(false),
+        no_text_panels: o.no_text_panels.unwrap_or(false),
+        heading_hierarchy: o.heading_hierarchy.unwrap_or(false),
+        page_range: parse_pages(o.pages.as_deref())?,
+        ocr_engine,
+        ocr_lang,
+        tesseract_lang,
+        ocr_mode: parse_ocr_mode(o.ocr_mode.clone())?
+            .as_deref()
+            .and_then(docling::OcrMode::parse),
+        ocr_scale: parse_ocr_scale(o.ocr_scale)?,
+        enrich: enrichments(
+            o.do_picture_classification,
+            o.do_code_enrichment,
+            o.do_formula_enrichment,
+        ),
+    })
+}
+
 #[napi]
 impl Pipeline {
-    /// Construct the pipeline. `strict` (cleaner Markdown) and the three
+    /// Construct the pipeline. `strict` (cleaner Markdown), the three
     /// enrichment switches (`doPictureClassification`, `doCodeEnrichment`,
-    /// `doFormulaEnrichment`, #423) are read — the enrichment passes are
-    /// per-instance state, so pick them here; `fetchImages` /
-    /// `allowedFormats` don't apply to the PDF/image pipeline.
+    /// `doFormulaEnrichment`, #423) and every PDF/image option the one-shot
+    /// calls honour — `ocrEngine`, `ocrLang`, `ocrMode`, `ocrScale`,
+    /// `skipOcr`, `forceFullPageOcr`, `noTextPanels`, `headingHierarchy`,
+    /// `pages` — are read here and apply to every conversion on this
+    /// instance, validated exactly as `DocumentConverter` validates them
+    /// (#471; before, only `strict` and the enrichment switches were read
+    /// and a `por+eng` Tesseract pipeline silently ran PP-OCR English).
+    /// `fetchImages` / `allowedFormats` and the non-PDF options don't apply
+    /// to the PDF/image pipeline.
     #[napi(constructor)]
     pub fn new(options: Option<ConverterOptions>) -> Result<Self> {
         let options = options.unwrap_or_default();
@@ -1162,13 +1238,25 @@ impl Pipeline {
             }
         }
         let strict = options.strict.unwrap_or(false);
+        // Resolve (and so validate) before building: a bad `ocrLang` is an
+        // error on `new`, like on `DocumentConverter`, not a warning after
+        // the models have loaded.
+        let warm = warm_pipeline_config(&options)?;
         let pipeline = RsPipeline::new()
             .map_err(convert_err)?
-            .enrichments(enrichments(
-                options.do_picture_classification,
-                options.do_code_enrichment,
-                options.do_formula_enrichment,
-            ));
+            .skip_ocr(warm.skip_ocr)
+            .force_full_page_ocr(warm.force_full_page_ocr)
+            .no_text_panels(warm.no_text_panels)
+            .heading_hierarchy(docling::HeadingHierarchyOptions::enabled(
+                warm.heading_hierarchy,
+            ))
+            .ocr_engine(warm.ocr_engine)
+            .ocr_lang(warm.ocr_lang)
+            .tesseract_lang(warm.tesseract_lang)
+            .ocr_mode(warm.ocr_mode)
+            .ocr_scale(warm.ocr_scale)
+            .pages(warm.page_range)
+            .enrichments(warm.enrich);
         Ok(Self {
             inner: Arc::new(Mutex::new(pipeline)),
             strict,
@@ -2046,5 +2134,119 @@ mod tests {
             "reason: {}",
             err.reason
         );
+    }
+
+    /// `new Pipeline(options)` primes the warm engine with every PDF/image
+    /// option the one-shot path honours (#471) — the same `parse_*` set as
+    /// `DocumentConverter`, resolved into the engine's typed values, with
+    /// `ocrLang` read against the engine it drives (#460): Tesseract's `-l`
+    /// list under Tesseract, the en/ch recognizer under PP-OCR.
+    #[test]
+    fn warm_pipeline_reads_the_pdf_options() {
+        let got = warm_pipeline_config(&ConverterOptions {
+            ocr_engine: Some("tesseract".into()),
+            ocr_lang: Some("por+eng".into()),
+            ocr_mode: Some("full_page".into()),
+            ocr_scale: Some(3.0),
+            skip_ocr: Some(false),
+            force_full_page_ocr: Some(true),
+            no_text_panels: Some(true),
+            heading_hierarchy: Some(true),
+            pages: Some("2-3".into()),
+            do_formula_enrichment: Some(true),
+            ..Default::default()
+        })
+        .expect("valid options");
+        assert_eq!(got.ocr_engine, Some(docling::OcrEngine::Tesseract));
+        assert_eq!(got.tesseract_lang.as_deref(), Some("por+eng"));
+        assert_eq!(got.ocr_lang, None, "under Tesseract ocrLang is its -l list");
+        assert_eq!(got.ocr_mode, Some(docling::OcrMode::FullPage));
+        assert_eq!(got.ocr_scale, Some(3.0));
+        assert!(!got.skip_ocr);
+        assert!(got.force_full_page_ocr);
+        assert!(got.no_text_panels);
+        assert!(got.heading_hierarchy);
+        assert_eq!(got.page_range, Some((2, 3)));
+        assert!(got.enrich.formula);
+        assert!(!got.enrich.code);
+
+        let got = warm_pipeline_config(&ConverterOptions {
+            ocr_engine: Some("ppocr".into()),
+            ocr_lang: Some("zh-Hans".into()),
+            ..Default::default()
+        })
+        .expect("valid options");
+        assert_eq!(got.ocr_engine, Some(docling::OcrEngine::PpOcr));
+        assert_eq!(got.ocr_lang, Some(docling::OcrLang::Ch));
+        assert_eq!(got.tesseract_lang, None, "PP-OCR takes no Tesseract list");
+    }
+
+    /// No option → `None` everywhere, so the engine keeps its own defaults
+    /// (`DOCLING_RS_OCR_*`, the 2.0 px/pt render) exactly as before #471.
+    #[test]
+    fn warm_pipeline_defaults_choose_nothing() {
+        let got = warm_pipeline_config(&ConverterOptions::default()).expect("defaults");
+        assert_eq!(
+            got,
+            WarmPipelineConfig {
+                skip_ocr: false,
+                force_full_page_ocr: false,
+                no_text_panels: false,
+                heading_hierarchy: false,
+                page_range: None,
+                ocr_engine: None,
+                ocr_lang: None,
+                tesseract_lang: None,
+                ocr_mode: None,
+                ocr_scale: None,
+                enrich: docling::EnrichmentOptions::default(),
+            }
+        );
+    }
+
+    /// The two classes share one validation contract: whatever
+    /// `new DocumentConverter(o)` throws on, `new Pipeline(o)` throws on too —
+    /// #471's `new Pipeline({ ocrEngine: 'tesseract', ocrLang: 'xx' })` used
+    /// to construct fine and OCR in English.
+    #[test]
+    fn warm_pipeline_rejects_what_document_converter_rejects() {
+        let bad = [
+            ConverterOptions {
+                ocr_engine: Some("bogus".into()),
+                ..Default::default()
+            },
+            ConverterOptions {
+                ocr_engine: Some("tesseract".into()),
+                ocr_lang: Some("xx".into()),
+                ..Default::default()
+            },
+            ConverterOptions {
+                ocr_engine: Some("ppocr".into()),
+                ocr_lang: Some("deu".into()),
+                ..Default::default()
+            },
+            ConverterOptions {
+                ocr_mode: Some("sideways".into()),
+                ..Default::default()
+            },
+            ConverterOptions {
+                ocr_scale: Some(0.0),
+                ..Default::default()
+            },
+            ConverterOptions {
+                pages: Some("3-1".into()),
+                ..Default::default()
+            },
+        ];
+        for o in bad {
+            assert!(
+                DocumentConverter::new(Some(o.clone())).is_err(),
+                "DocumentConverter should reject {o:?}"
+            );
+            assert!(
+                warm_pipeline_config(&o).is_err(),
+                "Pipeline must reject what DocumentConverter rejects: {o:?}"
+            );
+        }
     }
 }

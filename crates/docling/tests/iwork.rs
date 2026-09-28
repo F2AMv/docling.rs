@@ -325,11 +325,12 @@ fn zip_with(members: &[(&str, &[u8])]) -> Vec<u8> {
     buf
 }
 
-/// Legacy (pre-2013) Numbers/Keynote packages carry `index.xml`, not IWA —
-/// only Pages has an '09 reader (docling's), so the error must say so instead
-/// of a generic parse failure.
+/// A ZIP that is not a Keynote document of any generation — no `Index/`, no
+/// `Index.zip`, no `index.apxl` (a Pages-style `index.xml` is not one) —
+/// fails with docling's message naming the three layouts (#466), not a
+/// generic parse failure. Pre-2013 Numbers packages still say so.
 #[test]
-fn pre_iwa_package_reports_clearly() {
+fn non_keynote_package_reports_clearly() {
     // A minimal zip with only an index.xml member.
     let mut buf = Vec::new();
     {
@@ -340,7 +341,13 @@ fn pre_iwa_package_reports_clearly() {
         zip.write_all(b"<document/>").unwrap();
         zip.finish().unwrap();
     }
-    let source = SourceDocument::from_bytes("old", docling::InputFormat::Keynote, buf);
+    let source = SourceDocument::from_bytes("old", docling::InputFormat::Keynote, buf.clone());
+    let err = DocumentConverter::new().convert(source).unwrap_err();
+    assert!(
+        err.to_string().contains("index.apxl"),
+        "unexpected error: {err}"
+    );
+    let source = SourceDocument::from_bytes("old", docling::InputFormat::Numbers, buf);
     let err = DocumentConverter::new().convert(source).unwrap_err();
     assert!(
         err.to_string().contains("pre-2013"),

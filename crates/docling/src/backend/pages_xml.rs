@@ -672,6 +672,7 @@ mod tests {
                 Block::Paragraph(_) => "p",
                 Block::Table(_) => "table",
                 Block::Picture(_) => "picture",
+                Block::Chart(_) => "chart",
             })
             .collect();
         assert_eq!(kinds, ["p", "p", "p", "p", "table", "picture"]);

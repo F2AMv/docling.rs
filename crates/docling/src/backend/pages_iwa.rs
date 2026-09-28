@@ -760,6 +760,10 @@ pub(crate) struct Reader<'a, 'p> {
     data_files: HashMap<u64, String>,
     /// Every drawable already emitted (see the type docs).
     pub(crate) emitted: HashSet<u64>,
+    /// Whether `TSCH.ChartDrawableArchive`s are read — the Keynote reader's
+    /// doing (docling reads only a presentation's charts, "until another
+    /// app's are verified too"); the Pages reader leaves them out.
+    pub(crate) charts: bool,
 }
 
 impl<'a, 'p> Reader<'a, 'p> {
@@ -776,6 +780,7 @@ impl<'a, 'p> Reader<'a, 'p> {
             data_prefix: data_prefix.to_string(),
             data_files: HashMap::new(),
             emitted: HashSet::new(),
+            charts: false,
         };
         reader.data_files = reader.data_files();
         reader
@@ -980,6 +985,13 @@ impl<'a, 'p> Reader<'a, 'p> {
                 };
                 table(model, self.objects)
                     .map(Block::Table)
+                    .into_iter()
+                    .collect()
+            }
+            // A chart, also when grouped with other shapes on a slide.
+            super::iwork_charts::TSCH_CHART_DRAWABLE if self.charts => {
+                super::iwork_charts::iwa_chart(drawable, self.objects)
+                    .map(Block::Chart)
                     .into_iter()
                     .collect()
             }

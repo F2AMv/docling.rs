@@ -49,6 +49,7 @@ mod keynote;
 mod keynote_iwa;
 mod keynote_xml;
 mod latex;
+mod latex_walker;
 mod lotus;
 mod markdown;
 mod md_tree;

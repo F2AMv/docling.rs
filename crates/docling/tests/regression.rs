@@ -132,9 +132,15 @@ fn sources() -> Vec<Source> {
     out
 }
 
-/// `<fmt>/expected/<file><suffix>` for a source.
+/// `<fmt>/expected/<file><suffix>` for a source. A mirrored source inside a
+/// directory (`1706.03762/main.tex`) takes upstream's fixture name for it,
+/// the path with `_` for `/` (`1706.03762_main.tex`).
 fn expected_path(src: &Source, suffix: &str) -> PathBuf {
-    let name = src.path.file_name().unwrap().to_string_lossy();
+    let name = src
+        .rel
+        .split_once('/')
+        .map_or(src.rel.as_str(), |(_, name)| name)
+        .replace('/', "_");
     src.fmt_dir.join("expected").join(format!("{name}{suffix}"))
 }
 

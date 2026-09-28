@@ -192,6 +192,15 @@ fn is_checkbox_like(e: &scraper::node::Element) -> bool {
     is_input_checkbox_or_radio(e) || is_custom_checkbox(e)
 }
 
+/// upstream's `li.find(_BLOCK_TAGS) is not None`: whether a block-level tag
+/// sits anywhere below the element.
+fn has_block_descendant(el: ElementRef) -> bool {
+    el.descendants()
+        .skip(1)
+        .filter_map(ElementRef::wrap)
+        .any(|d| BLOCK_TAGS.contains(&d.value().name()))
+}
+
 /// upstream's `_is_checkbox_label_container`.
 fn is_checkbox_label_container(el: ElementRef) -> bool {
     has_class(el.value(), CHECKBOX_CONTAINER_CLASSES)
@@ -869,26 +878,12 @@ impl<'a> Walker<'a> {
                         .children()
                         .filter_map(ElementRef::wrap)
                         .find(|c| c.value().name() == "figcaption");
-                    if let Some(cap) = caption_tag {
-                        let parts = self.extract(*cap, false, true, false);
-                        let single = to_single(&parts);
-                        if !single.text.is_empty() {
-                            let text = clean_unicode(single.text.trim());
-                            let parent = self.parent();
-                            let cap_item = self.add_annotated(
-                                "caption",
-                                text,
-                                Some(single.text.clone()),
-                                single.formatting,
-                                single.hyperlink,
-                                parent,
-                            );
-                            if let Some(&first) = added.first() {
-                                if let TreeKind::Table { captions, .. } =
-                                    &mut self.tree.items[first].kind
-                                {
-                                    captions.push(cap_item);
-                                }
+                    if let Some(cap_item) = caption_tag.and_then(|cap| self.emit_caption(cap)) {
+                        if let Some(&first) = added.first() {
+                            if let TreeKind::Table { captions, .. } =
+                                &mut self.tree.items[first].kind
+                            {
+                                captions.push(cap_item);
                             }
                         }
                     }
@@ -1194,6 +1189,19 @@ impl<'a> Walker<'a> {
                 .filter(|c| is_custom_checkbox(c.value()))
                 .filter(|c| ancestor_named(**c, "li", None).is_some_and(|l| l.id() == li.id()))
                 .collect();
+            // GFM task-list form (docling#4401): bare checkbox input(s) plus
+            // inline text and no block content. The text belongs to the
+            // checkbox item(s), emitted under the list group — no list item.
+            let task_list = !inputs.is_empty()
+                && boxes.is_empty()
+                && inputs.iter().all(|i| is_input_checkbox_or_radio(i.value()))
+                && !has_block_descendant(li);
+            if task_list {
+                for input in &inputs {
+                    self.emit_input(*input);
+                }
+                continue;
+            }
             let item = self.add_list_item_with_content(li, list_group, is_ordered, &marker, None);
             if item.is_some() {
                 counter += 1;
@@ -1355,6 +1363,14 @@ impl<'a> Walker<'a> {
     /// stack preserved around it) and re-parented under a group of the table,
     /// every cell recorded with its declared spans and raw text.
     fn handle_table(&mut self, tag: ElementRef<'a>) -> usize {
+        // The table's own `<caption>` (non-recursive, so a nested table does
+        // not steal its ancestor's) is emitted first, under the current
+        // parent, and linked from the table (docling#4289).
+        let caption = tag
+            .children()
+            .filter_map(ElementRef::wrap)
+            .find(|c| c.value().name() == "caption")
+            .and_then(|cap| self.emit_caption(cap));
         let parent = self.parent();
         let table_id = self.tree.add(
             parent,
@@ -1362,7 +1378,7 @@ impl<'a> Walker<'a> {
             TreeKind::Table {
                 table: Table::default(),
                 rich_cells: Vec::new(),
-                captions: Vec::new(),
+                captions: caption.into_iter().collect(),
             },
         );
         // `thead` / `tbody` are unwrapped; a `tfoot`'s rows are not reached.
@@ -1607,6 +1623,26 @@ impl<'a> Walker<'a> {
         )
     }
 
+    /// upstream's `_emit_caption`: a `<caption>`/`<figcaption>` as a `caption`
+    /// text item under the current parent; `None` when it holds no text.
+    fn emit_caption(&mut self, cap: ElementRef<'a>) -> Option<usize> {
+        let parts = self.extract(*cap, false, true, false);
+        let single = to_single(&parts);
+        if single.text.trim().is_empty() {
+            return None;
+        }
+        let text = clean_unicode(single.text.trim());
+        let parent = self.parent();
+        Some(self.add_annotated(
+            "caption",
+            text,
+            Some(single.text.clone()),
+            single.formatting,
+            single.hyperlink,
+            parent,
+        ))
+    }
+
     /// upstream's `_emit_input`.
     fn emit_input(&mut self, input: ElementRef<'a>) -> Option<usize> {
         let e = input.value();
@@ -1623,7 +1659,19 @@ impl<'a> Walker<'a> {
             } else {
                 "checkbox_unselected"
             };
-            (label, normalize_checkbox_text(&checkbox_label_text(input)))
+            let mut text = normalize_checkbox_text(&checkbox_label_text(input));
+            if text.is_empty() {
+                // GFM task-list form (docling#4401): a bare checkbox followed by
+                // sibling text inside its list item — that text is the
+                // checkbox's label. Only a plain `<li>` parent counts, so
+                // nested blocks cannot leak into the label.
+                if let Some(li) = input.parent().and_then(ElementRef::wrap) {
+                    if li.value().name() == "li" && !has_block_descendant(li) {
+                        text = normalize_checkbox_text(&li.text().collect::<String>());
+                    }
+                }
+            }
+            (label, text)
         } else {
             let text = ["value", "placeholder", "name"]
                 .iter()

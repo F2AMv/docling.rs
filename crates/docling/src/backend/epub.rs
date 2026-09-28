@@ -49,7 +49,13 @@ impl DeclarativeBackend for EpubBackend {
         let mut combined =
             String::from("<!DOCTYPE html><html><head><meta charset=\"utf-8\"/></head><body>");
         let body_re = cached_regex!(r"(?is)<body[^>]*>(.*?)</body>");
-        let link_re = cached_regex!(r#"href="([^"]*\.xhtml)(#[^"]*)""#);
+        // A link into another content document is reduced to its anchor:
+        // the file it names is merged into this one. A content document is
+        // XHTML by its manifest media-type, not its name, so `.xht`, `.htm`
+        // and `.html` (Calibre's choice) count too (docling#4293); a link
+        // with a scheme or a protocol-relative one belongs to a host and is
+        // left alone.
+        let link_re = cached_regex!(r#"href="([^"]*\.(?:xhtml|xht|html?))(#[^"]*)""#);
         // Images extracted from the archive, keyed by their resolved in-archive
         // path (which each `<img src>` is rewritten to during concatenation).
         let mut images: HashMap<String, PictureImage> = HashMap::new();
@@ -61,7 +67,13 @@ impl DeclarativeBackend for EpubBackend {
                 .captures(&xhtml)
                 .map(|c| c[1].to_string())
                 .unwrap_or(xhtml);
-            let body = link_re.replace_all(&body, r#"href="$2""#);
+            let body = link_re.replace_all(&body, |caps: &regex::Captures| {
+                if is_external_href(&caps[1]) {
+                    caps[0].to_string()
+                } else {
+                    format!("href=\"{}\"", &caps[2])
+                }
+            });
             // Each `<img src>` is relative to *this* spine file's directory, so
             // resolve + extract here, before the bodies are flattened together.
             let body = if self.fetch_images {
@@ -89,6 +101,19 @@ impl DeclarativeBackend for EpubBackend {
 /// read the image bytes into `images`. `data:`/remote sources are left untouched
 /// (they stay placeholders for EPUB). `dir` is the spine file's directory.
 /// A spine content document as text: UTF-8, or UTF-16 when it opens with a
+/// Whether an href leaves the book: a scheme (`https:`, `mailto:`) or a
+/// protocol-relative `//host` — upstream's `(?!\w+:|//)`.
+fn is_external_href(href: &str) -> bool {
+    if href.starts_with("//") {
+        return true;
+    }
+    let scheme_len = href
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        .count();
+    scheme_len > 0 && href[scheme_len..].starts_with(':')
+}
+
 /// UTF-16 byte order mark (docling#4351 — `xhtml_data.decode("utf-8")` used to
 /// drop such a file). The BOM itself is not part of the text.
 fn read_content(pkg: &mut Package, path: &str) -> Option<String> {
@@ -337,6 +362,41 @@ mod tests {
         assert_eq!(
             rootfile_path(container).as_deref(),
             Some("epub/content.opf")
+        );
+    }
+
+    /// docling#4293: a cross-document link is reduced to its anchor whatever
+    /// the content document's extension; a link to a host is left alone.
+    #[test]
+    fn internal_links_of_every_extension_become_anchors() {
+        let re = cached_regex!(r#"href="([^"]*\.(?:xhtml|xht|html?))(#[^"]*)""#);
+        let fix = |html: &str| -> String {
+            re.replace_all(html, |caps: &regex::Captures| {
+                if is_external_href(&caps[1]) {
+                    caps[0].to_string()
+                } else {
+                    format!("href=\"{}\"", &caps[2])
+                }
+            })
+            .into_owned()
+        };
+        for ext in ["xhtml", "html", "htm", "xht"] {
+            assert_eq!(
+                fix(&format!("<a href=\"../text/ch2.{ext}#n1\">")),
+                "<a href=\"#n1\">"
+            );
+        }
+        assert_eq!(
+            fix("<a href=\"https://example.com/page.html#about\">"),
+            "<a href=\"https://example.com/page.html#about\">"
+        );
+        assert_eq!(
+            fix("<a href=\"//example.com/page.html#about\">"),
+            "<a href=\"//example.com/page.html#about\">"
+        );
+        assert_eq!(
+            fix("<a href=\"mailto:a@example.com\">"),
+            "<a href=\"mailto:a@example.com\">"
         );
     }
 

@@ -331,6 +331,10 @@ const ENV_SPECS: &[(&str, &str, bool)] = &[
     ("tabular", "{", false),
     ("tabular*", "{{", false),
     ("tabularx", "{[{", false),
+    // docling's own addition to pylatexenc's context (`latex_context.py`,
+    // docling#4325): without it a longtable's column specification would be
+    // read as its first cell.
+    ("longtable", "[{", false),
     ("array", "[{", false),
     ("equation", "", true),
     ("equation*", "", true),

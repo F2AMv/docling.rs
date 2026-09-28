@@ -401,6 +401,10 @@ impl Parser<'_> {
         // stays where it is read (docling ≤ 2.126 hung it off the body root,
         // which rendered it after the whole section tree).
         if let Some((n, text)) = section_header(line) {
+            // A heading ends the paragraph being accumulated: without this
+            // flush the text before it joined the text after it and landed
+            // in the wrong section (docling#4428).
+            self.flush_text(doc);
             doc.push(Node::Heading {
                 level: n.min(6),
                 text: escape_text(text.trim()),
@@ -1083,6 +1087,30 @@ mod tests {
             md("= T\n\n* one\n* two\n\n== Head\n\npara\n"),
             "# T\n\n- one\n- two\n\n## Head\n\npara\n"
         );
+    }
+
+    /// docling#4428: the text before a heading is its own paragraph, under
+    /// the section it was written in — not joined to the text after the
+    /// heading and moved to the new section.
+    #[test]
+    fn a_heading_flushes_the_pending_paragraph_into_its_own_section() {
+        let doc = parse(
+            "= T\n\n== S1\n\n=== S1.1\n\nbody\n== S2\n\nbody2\n",
+            "t",
+            &NoFetch,
+        );
+        assert_eq!(
+            doc.export_to_markdown().trim(),
+            "# T\n\n## S1\n\n### S1.1\n\nbody\n\n## S2\n\nbody2"
+        );
+        let json: serde_json::Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        let texts = json["texts"].as_array().unwrap();
+        let body = texts.iter().find(|t| t["text"] == "body").unwrap();
+        let s11 = texts.iter().find(|t| t["text"] == "S1.1").unwrap();
+        assert_eq!(body["parent"]["$ref"], s11["self_ref"]);
+        let body2 = texts.iter().find(|t| t["text"] == "body2").unwrap();
+        let s2 = texts.iter().find(|t| t["text"] == "S2").unwrap();
+        assert_eq!(body2["parent"]["$ref"], s2["self_ref"]);
     }
 
     #[test]

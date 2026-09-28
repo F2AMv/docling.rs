@@ -741,7 +741,7 @@ impl Walker {
                 hyperlink = Some(docling_href(dest));
             }
             El::Text(original) => {
-                let mut snippet = unescape_entities(original.trim());
+                let snippet = unescape_entities(original.trim());
                 // Any spelling of `|` — `\|`, `&#x7c;`, `&verbar;` — stays
                 // encoded while deciding whether the run is a table row
                 // (`_unescape_except_pipe`, docling#4371), so it cannot open
@@ -754,13 +754,15 @@ impl Walker {
                 if is_table_row {
                     self.in_table = true;
                 }
-                if self.in_table && !snippet.is_empty() {
+                if self.in_table && !original.is_empty() {
                     // Formatted cell content arrives as separate runs, each
-                    // appended to the row being buffered.
-                    snippet = original.trim().to_string();
+                    // appended to the row being buffered *unstripped*
+                    // (docling#4318): the space between `**C**` and `Cadre`
+                    // belongs to the cell, which is trimmed once split.
+                    let table_text = original.to_string();
                     match self.table_buffer.last_mut() {
-                        Some(last) => last.push_str(&snippet),
-                        None => self.table_buffer.push(snippet),
+                        Some(last) => last.push_str(&table_text),
+                        None => self.table_buffer.push(table_text),
                     }
                 } else if !snippet.is_empty() {
                     self.close_table();

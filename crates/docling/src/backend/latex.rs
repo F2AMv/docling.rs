@@ -266,6 +266,12 @@ const TABLE_MACROS_IGNORE: &[&str] = &[
     "hphantom",
     "vphantom",
     "noalign",
+    // longtable's repeating header/footer markers are not cell content
+    // (docling#4325).
+    "endhead",
+    "endfirsthead",
+    "endfoot",
+    "endlastfoot",
 ];
 
 /// The `\input` nesting upstream allows.
@@ -1050,7 +1056,7 @@ impl Converter {
             }
             _ if ENV_QUOTE.contains(&name) => self.process_nodes(nodelist, src, parent, text_label),
             _ if ENV_LIST.contains(&name) => self.process_list(nodelist, src, parent, text_label),
-            "tabular" => {
+            "tabular" | "tabular*" | "tabularx" | "longtable" => {
                 if let Some(table) = self.parse_table(node, src) {
                     self.doc.add_table(parent, table);
                 }
@@ -1917,6 +1923,30 @@ mod tests {
         assert_eq!(data["num_rows"], 2);
         assert_eq!(data["num_cols"], 2);
         assert_eq!(data["table_cells"].as_array().unwrap().len(), 4);
+    }
+
+    /// docling#4325: `tabular*`, `tabularx` and `longtable` are tables too;
+    /// longtable's column specification is an argument (docling's own spec),
+    /// its `\\endhead` marker no cell content.
+    #[test]
+    fn wide_and_long_tables_are_tables() {
+        let tex = "\\begin{document}\n\\begin{longtable}{cc}\nH1 & H2 \\\\ \\endhead\na & b \\\\\n\\end{longtable}\n\
+            \\begin{tabularx}{\\textwidth}{XX}\nc & d \\\\\n\\end{tabularx}\n\\end{document}";
+        let json: serde_json::Value = serde_json::from_str(&convert(tex).export_to_json()).unwrap();
+        let tables = json["tables"].as_array().unwrap();
+        assert_eq!(tables.len(), 2, "{json}");
+        let cells = |t: usize| -> Vec<String> {
+            tables[t]["data"]["table_cells"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["text"].as_str().unwrap().to_string())
+                .collect()
+        };
+        // Each ends with docling's trailing blank row (the newline after
+        // the last `\\` is a chars node that finishes one more row).
+        assert_eq!(cells(0), ["H1", "H2", "a", "b", "", ""]);
+        assert_eq!(cells(1), ["c", "d", "", ""]);
     }
 
     #[test]

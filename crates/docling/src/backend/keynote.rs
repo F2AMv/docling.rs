@@ -310,6 +310,47 @@ impl SlideOut<'_> {
                 );
                 self.push(Node::Table(table), geometry);
             }
+            // `_add_chart`: a picture classified by the chart's kind, carrying
+            // its data as a table, captioned with the title the chart shows
+            // (docling#4376) — the shape the PowerPoint backend gives a chart.
+            // The caption comes first, with the chart's box and a charspan
+            // over the title.
+            Block::Chart(chart) => {
+                self.close_lists();
+                let caption = chart.title.as_deref().map(|title| {
+                    let prov = self.prov(geometry, title);
+                    self.tree.add_with_prov(
+                        Some(self.group),
+                        None,
+                        text_kind("caption", title, None, None, None),
+                        prov,
+                    )
+                });
+                let table = chart.table();
+                let prov = self.prov(geometry, "");
+                self.tree.add_with_prov(
+                    Some(self.group),
+                    None,
+                    TreeKind::Picture {
+                        captions: caption.into_iter().collect(),
+                        image: None,
+                        classification: Some(chart.label.clone()),
+                        confidence: None,
+                        chart: table.clone(),
+                        dpi: None,
+                    },
+                    prov,
+                );
+                self.push(
+                    Node::Chart {
+                        kind: chart.label,
+                        table: table.unwrap_or_default(),
+                        caption: chart.title,
+                        location: None,
+                    },
+                    geometry,
+                );
+            }
         }
     }
 

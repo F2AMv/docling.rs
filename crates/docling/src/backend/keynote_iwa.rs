@@ -115,7 +115,14 @@ pub(crate) fn read_content(
         })?;
     let (width, height) = slide_size(show);
     let mut reader = KeynoteReader {
-        inner: Reader::new(&objects, &order, container, data_prefix),
+        inner: {
+            // docling reads only a presentation's charts
+            // (`KeynoteReader._drawable_blocks`), so this reader asks the
+            // shared one for them.
+            let mut reader = Reader::new(&objects, &order, container, data_prefix);
+            reader.charts = true;
+            reader
+        },
     };
     Ok(Presentation {
         slides: reader.slides(show),
@@ -227,8 +234,9 @@ impl<'a> KeynoteReader<'a, '_> {
                 }
                 (Vec::new(), self.comments(drawable))
             }
-            // Charts (`TSCH.ChartDrawableArchive`) are not read yet; the
-            // shared reader yields nothing for them.
+            // Anything else — a text box, image, table, group, or a chart
+            // (`TSCH.ChartDrawableArchive`, docling#4376) — the shared
+            // reader reads, charts included since this reader asks for them.
             _ => {
                 let blocks = self
                     .inner

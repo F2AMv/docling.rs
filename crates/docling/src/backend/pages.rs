@@ -11,7 +11,7 @@
 //! `docling/backend/iwork/content.py` or `iwork_backend.py`.
 
 use docling_core::{
-    inline_paragraph_node, ContentLayer, DoclingDocument, InlineRun, Node, Script, Table,
+    inline_paragraph_node, ContentLayer, DoclingDocument, InlineRun, Node, Script, Table, TableCell,
 };
 
 use crate::backend::markdown::escape_text;
@@ -187,12 +187,103 @@ pub(crate) struct Picture {
     pub name: String,
 }
 
+/// One series of a chart: its name, and its value in each category (`None`
+/// where the chart has no number, so a gap stays in its place).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ChartSeries {
+    pub name: String,
+    pub values: Vec<Option<f64>>,
+}
+
+/// A chart, and the data it was last drawn from — docling's `Chart`
+/// (docling#4376, #466). iWork keeps no picture of a chart, only the model
+/// the app draws one from, so this is everything there is to recover.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Chart {
+    /// docling's picture classification label (`pie_chart`, `bar_chart`, …).
+    pub label: String,
+    /// The title the chart shows, if any.
+    pub title: Option<String>,
+    pub categories: Vec<String>,
+    pub series: Vec<ChartSeries>,
+}
+
+impl Chart {
+    /// `_chart_table`: the data laid out categories down and series across —
+    /// a blank corner, a header row of series names, a row-header column of
+    /// categories — the layout the PowerPoint and Excel backends give a
+    /// chart's data. `None` when the chart holds nothing to plot.
+    pub(crate) fn table(&self) -> Option<Table> {
+        let rows = self
+            .series
+            .iter()
+            .map(|s| s.values.len())
+            .chain(std::iter::once(self.categories.len()))
+            .max()
+            .unwrap_or(0);
+        if self.series.is_empty() || rows == 0 {
+            return None;
+        }
+        let mut texts: Vec<Vec<String>> = Vec::with_capacity(rows + 1);
+        texts.push(
+            std::iter::once(String::new())
+                .chain(self.series.iter().map(|s| s.name.clone()))
+                .collect(),
+        );
+        for row in 0..rows {
+            let category = self.categories.get(row).cloned().unwrap_or_default();
+            texts.push(
+                std::iter::once(category)
+                    .chain(
+                        self.series
+                            .iter()
+                            .map(|s| chart_value(s.values.get(row).copied().flatten())),
+                    )
+                    .collect(),
+            );
+        }
+        let cells = texts
+            .iter()
+            .enumerate()
+            .flat_map(|(row, line)| {
+                line.iter().enumerate().map(move |(col, text)| TableCell {
+                    text: text.clone(),
+                    bbox: None,
+                    start_row: row,
+                    start_col: col,
+                    row_span: 1,
+                    col_span: 1,
+                    column_header: row == 0,
+                    row_header: row > 0 && col == 0,
+                    row_section: false,
+                })
+            })
+            .collect();
+        Some(Table {
+            rows: texts,
+            cells: Some(cells),
+            ..Default::default()
+        })
+    }
+}
+
+/// `_chart_value`: a value as the chart's data editor shows it — a whole
+/// number without the `.0` a float prints with, nothing for a gap.
+fn chart_value(value: Option<f64>) -> String {
+    match value {
+        None => String::new(),
+        Some(v) if v.fract() == 0.0 && v.abs() < 1e15 => format!("{}", v as i64),
+        Some(v) => format!("{v}"),
+    }
+}
+
 /// One piece of document content, in the order Pages lays it out.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Block {
     Paragraph(Paragraph),
     Picture(Picture),
     Table(Table),
+    Chart(Chart),
 }
 
 /// One comment thread entry, and the identifier of the text it annotates.
@@ -449,6 +540,17 @@ pub(crate) fn emit(content: Content, doc: &mut DoclingDocument) {
             Block::Table(t) => {
                 lists.close();
                 Node::Table(t.clone())
+            }
+            // Only the Keynote reader yields charts; the shape is the one
+            // the PowerPoint backend gives them.
+            Block::Chart(c) => {
+                lists.close();
+                Node::Chart {
+                    kind: c.label.clone(),
+                    table: c.table().unwrap_or_default(),
+                    caption: c.title.clone(),
+                    location: None,
+                }
             }
         };
         match targets.remove(&i) {

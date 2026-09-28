@@ -44,6 +44,7 @@ mod html_tree;
 pub(crate) mod images;
 mod interchange;
 mod iwork;
+mod iwork_charts;
 pub(crate) mod jats;
 mod keynote;
 mod keynote_iwa;

@@ -289,6 +289,15 @@ models are mutable sessions) — overlapping `*Async` calls queue in submission
 order, so batch throughput comes from keeping the models warm, not from
 parallel calls.
 
+The constructor takes the same PDF/image options as the one-shot calls —
+`ocrEngine`, `ocrLang`, `ocrMode`, `ocrScale`, `skipOcr`, `forceFullPageOcr`,
+`noTextPanels`, `headingHierarchy`, `pages` and the enrichment switches — and
+applies them to every conversion on that instance, e.g.
+`new Pipeline({ ocrEngine: 'tesseract', ocrLang: 'por+eng' })` for Portuguese
+scans. They are validated on `new` exactly as `DocumentConverter` validates
+them (an unknown `ocrLang` throws, #471). The per-call `OutputOptions` only
+choose the output (`to`, `imageMode`, `artifactsDir`, `pageBreakPlaceholder`).
+
 `Pipeline` rejects `pipeline: 'vlm'`: that pipeline loads no models, so there
 is nothing to keep warm — use `convertFileAsync` or `DocumentConverter`.
 
@@ -392,7 +401,10 @@ models, #388), and `pages: 'A-B'` converts only that
 
 `Pipeline` is the reusable warm PDF/image converter: `new Pipeline(converterOptions)`
 then `convertFile` / `convert` / `convertFileAsync` / `convertAsync` /
-`convertFileStreaming` / `streamFileMarkdown`.
+`convertFileStreaming` / `streamFileMarkdown`. It reads `strict`, the
+enrichment switches and every PDF/image option (`ocrEngine`, `ocrLang`,
+`ocrMode`, `ocrScale`, `skipOcr`, `forceFullPageOcr`, `noTextPanels`,
+`headingHierarchy`, `pages`) from `converterOptions` (#471).
 
 `DocumentConverter` is the reusable form: `new DocumentConverter(converterOptions)`
 then `convert` / `convertFile` / `convertFileAsync` / `convertAsync` /

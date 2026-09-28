@@ -373,6 +373,23 @@ async function main() {
     assert.throws(() => new Pipeline({ pipeline: 'magic' }), /unknown pipeline/)
   })
 
+  // #471: the warm class reads every PDF/image option the one-shot path does,
+  // and validates it on `new` the way DocumentConverter does — before, only
+  // `strict` and the enrichment switches were read, so a `por+eng` Tesseract
+  // pipeline constructed fine and silently ran PP-OCR English. The builders
+  // probe nothing (Tesseract is located on first use), so this needs no
+  // models or binary on disk.
+  await check('Pipeline validates its OCR options like DocumentConverter', () => {
+    assert.throws(() => new Pipeline({ ocrEngine: 'tesseract', ocrLang: 'xx' }), /ocrLang/)
+    assert.throws(() => new DocumentConverter({ ocrEngine: 'tesseract', ocrLang: 'xx' }), /ocrLang/)
+    assert.throws(() => new Pipeline({ ocrEngine: 'bogus' }), /ocrEngine/)
+    assert.throws(() => new Pipeline({ ocrMode: 'sideways' }), /ocrMode/)
+    assert.throws(() => new Pipeline({ ocrScale: 0 }), /ocrScale/)
+    assert.throws(() => new Pipeline({ pages: '3-1' }), /pages/)
+    new Pipeline({ ocrEngine: 'tesseract', ocrLang: 'por+eng', ocrMode: 'full_page', pages: '1-2' })
+    new Pipeline({ ocrEngine: 'ppocr', ocrLang: 'zh-Hans', ocrScale: 3, headingHierarchy: true })
+  })
+
   await check('a misspelled pipeline name reports the typo, not a missing model', () => {
     // The JS guard runs before native option parsing, so it has to recognize a
     // bad name itself — otherwise a capitalization slip falls through to the

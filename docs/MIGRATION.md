@@ -662,7 +662,10 @@ deliberate scope boundary or a cosmetic, single-fixture polish gap.
   UI; the warm pipeline is rebuilt when a request's enrichment mix differs
   from the cached instance's, as for the model switches — and the Node
   bindings (`doPictureClassification` / `doCodeEnrichment` /
-  `doFormulaEnrichment`, also on `new Pipeline()`);
+  `doFormulaEnrichment`, also on `new Pipeline()` — which since #471 reads
+  every PDF/image option of `ConverterOptions`, `ocrEngine` / `ocrLang` /
+  `ocrMode` / `ocrScale` / `skipOcr` / `forceFullPageOcr` / `noTextPanels` /
+  `headingHierarchy` / `pages`, validated like `DocumentConverter`);
   conformance-checked by `scripts/conformance/enrich_conformance.sh`.)
 
 **Now migrated (previously listed here):**

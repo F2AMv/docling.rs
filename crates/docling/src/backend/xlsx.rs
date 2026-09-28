@@ -652,22 +652,39 @@ fn sheet_items<F: Fn(&str, &str) -> Vec<String> + Sync>(ctx: SheetCtx<'_, F>) ->
                 ))
                 .map(|xml| xlsx_drawings::parse_threaded_comments(&xml, persons))
                 .unwrap_or_default();
-            // Row-major over commented cells (docling scans the grid).
-            let mut cells: Vec<SheetComment> = legacy
+            // Row-major over commented cells (docling scans the grid). A
+            // threaded cell yields one line per message of the thread, in
+            // thread order (docling#4353); the legacy comment (which holds
+            // the thread flattened into one blob) only stands in when the
+            // cell has no threaded messages.
+            let mut cells: Vec<(usize, usize, usize, String, String)> = legacy
                 .iter()
                 .filter_map(|(cell, author, text)| {
                     let (c, r) = cell_ref_pub(cell)?;
-                    let line = match threaded.get(cell) {
-                        Some((a, t, time)) => match time {
-                            Some(ts) => format!("[author: {a}, time: {ts}]: {t}"),
-                            None => format!("[author: {a}]: {t}"),
-                        },
-                        None => format!("[author: {author}]: {text}"),
+                    let lines: Vec<String> = match threaded.get(cell) {
+                        Some(thread) if !thread.is_empty() => thread
+                            .iter()
+                            .map(|(a, t, time)| match time {
+                                Some(ts) => format!("[author: {a}, time: {ts}]: {t}"),
+                                None => format!("[author: {a}]: {t}"),
+                            })
+                            .collect(),
+                        _ => vec![format!("[author: {author}]: {text}")],
                     };
-                    Some((r, c, cell.clone(), line))
+                    Some((r, c, cell.clone(), lines))
+                })
+                .flat_map(|(r, c, cell, lines)| {
+                    lines
+                        .into_iter()
+                        .enumerate()
+                        .map(move |(k, line)| (r, c, k, cell.clone(), line))
                 })
                 .collect();
-            cells.sort_by_key(|(r, c, _, _)| (*r, *c));
+            cells.sort_by_key(|(r, c, k, _, _)| (*r, *c, *k));
+            let cells: Vec<SheetComment> = cells
+                .into_iter()
+                .map(|(r, c, _, cell, line)| (r, c, cell, line))
+                .collect();
             comments.extend(cells);
         }
     }
@@ -910,6 +927,15 @@ pub(crate) fn find_tables(
                 }
             }
             visited.extend(&cells);
+            // The table is the region's full bounding rectangle, gaps and
+            // disconnected non-empty cells included, so the whole rectangle is
+            // visited too — otherwise a stray cell inside it seeds a second,
+            // duplicate fragment table (docling#4302).
+            for vr in min_r..=max_r {
+                for vc in min_c..=max_c {
+                    visited.insert((vr, vc));
+                }
+            }
 
             // Split a leading "section label" off the region (docling's
             // `_split_leading_section_label`, PR #3727): the region is at
@@ -1405,7 +1431,9 @@ mod tests {
         );
         assert_eq!(children.len(), 3, "the sheet's three tables");
 
-        // The comment sections follow the sheets, in row-major cell order.
+        // The comment sections follow the sheets, in row-major cell order; a
+        // threaded cell contributes one section node per message (the JSON
+        // export folds same-named neighbours into one group, docling#4353).
         let sections: Vec<&str> = doc
             .nodes
             .iter()
@@ -1419,6 +1447,7 @@ mod tests {
             [
                 "comment-Sheet1-A1",
                 "comment-Sheet1-B2",
+                "comment-Sheet1-F7",
                 "comment-Sheet1-F7",
                 "comment-Sheet1-G12"
             ]
@@ -1436,7 +1465,8 @@ mod tests {
                 _ => Vec::new(),
             })
             .collect();
-        assert_eq!(annotated, vec![vec![0], vec![1], vec![2, 3]]);
+        // The third table is annotated by both F7 messages and G12's.
+        assert_eq!(annotated, vec![vec![0], vec![1], vec![2, 3, 4]]);
     }
 
     /// docling PR #3727: a merged full-width cell directly above a real

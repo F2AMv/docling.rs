@@ -133,6 +133,17 @@ packages (`.zip` with a `META-INF/catalog.xml`) mapping the base taxonomies'
 URLs to files. Without the option the instance's own directory is searched;
 whatever cannot be found only costs the graph its hierarchy links.
 
+**LaTeX** (`.tex`) is docling's `LatexDocumentBackend` ported handler for
+handler on a port of pylatexenc's tolerant `LatexWalker`, so a multi-file
+arXiv project converts the way upstream converts it: the preamble's
+`\title`/`\author`, sectioning, paragraphs, inline and display math,
+`\newcommand` expansion, `\input`/`\include` files parsed in place (kept
+inside the source's directory), lists, `thebibliography`, `tabular` grids,
+figures whose `\includegraphics` becomes an `Image: <path>` caption over a
+picture — a raster file embedded as PNG, a PDF figure left without a payload
+(upstream renders it with pypdfium2). The six arXiv papers upstream tests on
+are Markdown-exact and, but for those PDF payloads, JSON-identical.
+
 <details>
 <summary><b>Installing ffmpeg</b> (optional — only for video frame sampling)</summary>
 
@@ -187,7 +198,9 @@ bytes; ✅ all = every file of the format matches):
 | AsciiDoc | 4 | ✅ all | ✅ all |
 | USPTO | 9 | ✅ all | ✅ all |
 | EPUB | 1 | ✅ all | ✅ all |
-| LaTeX | 2 | 1 ¹ | 1 ¹ |
+| LaTeX | 8 | ✅ all | 7 ¹ |
+
+¹ `1706.03762`: one `tabular`'s cells carry consistent `row_span`/`col_span` where upstream writes the span into the offsets only; PDF figures carry no image payload (upstream renders them with pypdfium2).
 
 The JSON column is complete wherever the backend builds docling's item tree
 (HTML, DOCX, PPTX, ODF, WebVTT, JATS, AsciiDoc, DocLang, LaTeX, USPTO,

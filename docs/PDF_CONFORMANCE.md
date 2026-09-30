@@ -35,7 +35,7 @@ are no longer scored.)
 | table_mislabeled_as_picture | 48 | layout over-detects tables (survey rendered as tables) |
 | 2203.01017v2 | 51 | reference-accent spacing + author-block splits (in-picture table recovered: same grid as docling, different OCR engine noise) |
 | 2206.01062 | 56 | author-block cluster splits (model-borderline) + one int8-borderline header rowspan; 4 of the lines are the #424 same-row author order, which docling 2.127 produces too — the committed groundtruth is an older docling's |
-| right_to_left_03 | 58 | RTL bidi + wrapper (form) children order |
+| right_to_left_03 | 56 | RTL bidi + wrapper (form) children order |
 | redp5110_sampled | 70 | TOC row structure tails + cover-page ordering |
 
 Measured on the current tree with `scripts/conformance/pdf_groundtruth.sh`.
@@ -200,6 +200,26 @@ so only border-straddlers (≤ 80 % containment) surface as text, on scanned
 pages exactly as on digital ones. The digital corpus is untouched (6/14
 strict, same per-file diffs); 17 scanned/image snapshots shed their leaked
 figure-internal text (axis ticks, diagram labels — net −59 lines).
+
+**Picture children in the JSON.** "Absorbs as its child" is literal upstream:
+`_set_cluster_children` makes every regular cluster > 80 % inside a picture
+that picture's child, and `ReadingOrderModel._add_child_elements` writes each
+one under the `PictureItem` (`text` / `section_header` / list item / furniture
+page header, parent = the picture, after its caption). The port used to drop
+those regions, so the JSON lost all in-picture text (a 1,962-page born-digital manual: text
+recall incl. picture children 0.894 vs docling's 0.990). The regions now stay
+until `assemble_page`, which nests them under their picture
+(`assemble::picture_parents`, `Node::PictureChildren`); they claim cells like
+any regular (exclusive assignment, #419 refit) and are left out of the
+reading order and `layout_score`. Markdown, LaTeX and chunks are unchanged
+(docling's serializers print only the caption); DocLang is unchanged too,
+although upstream's DocLang picture serializer does print the children —
+a remaining DocLang deviation. On OCR'd pages the in-picture regions are now
+recognized (upstream OCRs them as part of the page). Markdown moves only where
+the old containment test dropped a region that is not a picture's child once
+cells are assigned: right_to_left_03 regains its `## شرکت بورس کالای ايران`
+heading, which the groundtruth and live docling 2.129 both have (58 → 56;
+one snapshot refreshed, the other 96 byte-identical).
 
 The #419 **cell refit** closes a gap that sat *before* the reading order.
 docling's `LayoutPostprocessor` never hands the model's boxes to the

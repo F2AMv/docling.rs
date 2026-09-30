@@ -451,17 +451,18 @@ pub fn resolve(regions: Vec<Region>) -> Vec<Region> {
 /// appearing both inside the detected table and again as bullets
 /// (`table_mislabeled_as_picture`).
 ///
-/// `picture` regions stay in the swallow set even after #165: docling keeps a
-/// picture's contained clusters as the `PictureItem`'s *children* in the
-/// document JSON (`ReadingOrderModel._add_child_elements`), but its
-/// `MarkdownPictureSerializer` prints only the caption and the image — the
+/// `picture` regions are **not** in the swallow set: docling keeps a picture's
+/// contained clusters as the `PictureItem`'s *children* in the document JSON
+/// (`_set_cluster_children`, `ReadingOrderModel._add_child_elements`), while
+/// its `MarkdownPictureSerializer` prints only the caption and the image — the
 /// children never reach the Markdown (verified against the corpus groundtruth:
-/// `amt_handbook`'s in-figure callout labels are absent). Dropping the
-/// fully-contained regulars here reproduces exactly that. What #165 *does*
-/// change is upstream, in [`add_orphan_regions`]: pictures no longer claim
-/// cells, so a line only partially under a figure box (straddling its border,
-/// ≤80 % contained) now forms an orphan region that survives this drop — those
-/// words were silently erased before, and docling emits them.
+/// `amt_handbook`'s in-figure callout labels are absent). So the regulars
+/// inside a picture stay in the region list, claim their cells and are fitted
+/// like any regular, and [`assemble_page`] lifts them out of the page's
+/// reading order into a [`Node::PictureChildren`] after their picture (see
+/// [`picture_parents`]). A line only partially under a figure box (straddling
+/// its border, ≤80 % contained) is no picture's child and is emitted, as
+/// docling emits it (#165).
 ///
 /// `form` / `key_value_region` wrappers are deliberately **excluded**: this
 /// pipeline does not render them as a structured block (they are skipped), so
@@ -472,7 +473,7 @@ pub fn resolve(regions: Vec<Region>) -> Vec<Region> {
 pub fn drop_contained_regulars(regions: &mut Vec<Region>) {
     let specials: Vec<(f32, f32, f32, f32)> = regions
         .iter()
-        .filter(|r| r.label == "picture" || is_table_like(r.label))
+        .filter(|r| is_table_like(r.label))
         .map(|r| (r.l, r.t, r.r, r.b))
         .collect();
     if specials.is_empty() {
@@ -487,6 +488,33 @@ pub fn drop_contained_regulars(regions: &mut Vec<Region>) {
             .iter()
             .any(|&(l, t, rr, b)| inter(r, l, t, rr, b) / ra > 0.8)
     });
+}
+
+/// docling's `_set_cluster_children` for pictures: a regular region (one that
+/// claims cells) whose box is > 80 % inside a picture's box
+/// (`intersection_over_self`) is that picture's child — not a page element
+/// (it leaves the reading order and the layout score), but an item under the
+/// `PictureItem` in the JSON. Returns, per region, the index of its parent
+/// picture: the smallest containing one when pictures nest (upstream would
+/// attach it to each).
+pub fn picture_parents(regions: &[Region]) -> Vec<Option<usize>> {
+    regions
+        .iter()
+        .map(|r| {
+            if !claims_cells(r) {
+                return None;
+            }
+            let ra = area(r.l, r.t, r.r, r.b).max(1.0);
+            regions
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.label == "picture" && inter(r, p.l, p.t, p.r, p.b) / ra > 0.8)
+                .min_by(|(_, a), (_, b)| {
+                    area(a.l, a.t, a.r, a.b).total_cmp(&area(b.l, b.t, b.r, b.b))
+                })
+                .map(|(i, _)| i)
+        })
+        .collect()
 }
 
 /// True for a bare, single-token source-code language label (`XML`, `C#`, `JSON`,
@@ -2467,18 +2495,31 @@ pub fn assemble_page(
     // Pair each region with its precomputed TableFormer grid and enrichment
     // (indexed by original order) and order by reading order together, so they
     // stay aligned.
+    // A picture's children (docling's `_set_cluster_children`: the regulars
+    // > 80 % inside it) are not page elements — they leave the reading order
+    // here and ride with their picture, to be written under it in the JSON.
+    let parents = picture_parents(&regions);
+    let mut kids: Vec<Vec<Region>> = vec![Vec::new(); regions.len()];
+    let mut top: Vec<(usize, Region)> = Vec::with_capacity(regions.len());
+    for (i, (r, parent)) in regions.into_iter().zip(parents).enumerate() {
+        match parent {
+            Some(p) => kids[p].push(r),
+            None => top.push((i, r)),
+        }
+    }
     // docling's assembly order of the regions — what its reading-order
     // predictor knows as `cid` (#424) — before they are shuffled.
-    let cids = cluster_cids(&regions, &page.cells);
-    type RegionItem = (Region, Option<TableGrid>, Option<Enrichment>);
-    let mut items: Vec<RegionItem> = regions
+    let top_regions: Vec<Region> = top.iter().map(|(_, r)| r.clone()).collect();
+    let cids = cluster_cids(&top_regions, &page.cells);
+    type RegionItem = (Region, Option<TableGrid>, Option<Enrichment>, Vec<Region>);
+    let mut items: Vec<RegionItem> = top
         .into_iter()
-        .enumerate()
         .map(|(i, r)| {
             (
                 r,
                 table_rows.get(i).cloned().flatten(),
                 enrichments.get(i).cloned().flatten(),
+                std::mem::take(&mut kids[i]),
             )
         })
         .collect();
@@ -2487,10 +2528,22 @@ pub fn assemble_page(
     // right_to_left_02's bottom `11` is its first item). Stable, so everything
     // else keeps its order; no-op on pages without such a region.
     let page_h = page.height;
-    items.sort_by_key(|(r, _, _)| !is_page_number(r, &page.cells, page_h));
-    let table_rows: Vec<Option<TableGrid>> = items.iter().map(|(_, t, _)| t.clone()).collect();
-    let enrichments: Vec<Option<Enrichment>> = items.iter().map(|(_, _, e)| e.clone()).collect();
-    let regions: Vec<Region> = items.into_iter().map(|(r, _, _)| r).collect();
+    items.sort_by_key(|(r, _, _, _)| !is_page_number(r, &page.cells, page_h));
+    let table_rows: Vec<Option<TableGrid>> = items.iter().map(|(_, t, _, _)| t.clone()).collect();
+    let enrichments: Vec<Option<Enrichment>> = items.iter().map(|(_, _, e, _)| e.clone()).collect();
+    let mut picture_children: Vec<Vec<Region>> = items
+        .iter_mut()
+        .map(|it| std::mem::take(&mut it.3))
+        .collect();
+    let regions: Vec<Region> = items.into_iter().map(|(r, _, _, _)| r).collect();
+    // Children in docling's `_sort_clusters(mode="id")` order: first source
+    // cell, then top, then left.
+    for kids in picture_children.iter_mut().filter(|k| k.len() > 1) {
+        let rank = cluster_cids(kids, &page.cells);
+        let mut ranked: Vec<(usize, Region)> = rank.into_iter().zip(kids.drain(..)).collect();
+        ranked.sort_by_key(|(k, _)| *k);
+        kids.extend(ranked.into_iter().map(|(_, r)| r));
+    }
     // docling emits a figure's caption *before* the image marker. Pair each
     // picture with the caption region nearest below it and consume that caption,
     // so it isn't also emitted in its own (lower) reading-order position.
@@ -2536,8 +2589,19 @@ pub fn assemble_page(
     // (paired captions, code labels) are excluded.
     // Exclusive docling cell assignment: computed once for the ordered region
     // list and reused for every serialization below, so a cell can never render
-    // in two regions.
-    let region_texts: Vec<String> = region_texts_exclusive(&regions, &page.cells);
+    // in two regions. The picture children take part (docling assigns cells to
+    // every regular cluster before it nests any); their texts are split off.
+    let with_children: Vec<Region> = regions
+        .iter()
+        .chain(picture_children.iter().flatten())
+        .cloned()
+        .collect();
+    let mut region_texts: Vec<String> = region_texts_exclusive(&with_children, &page.cells);
+    let mut kid_texts = region_texts.split_off(regions.len()).into_iter();
+    let child_texts: Vec<Vec<String>> = picture_children
+        .iter()
+        .map(|k| kid_texts.by_ref().take(k.len()).collect())
+        .collect();
     let is_text: Vec<bool> = regions
         .iter()
         .enumerate()
@@ -2638,6 +2702,16 @@ pub fn assemble_page(
                     caption_parent: CaptionParent::Item,
                 },
             ));
+            let children: Vec<Node> = picture_children[i]
+                .iter()
+                .zip(&child_texts[i])
+                .filter_map(|(r, text)| {
+                    picture_child_node(r, text, norm_loc(r, page.width, page_h))
+                })
+                .collect();
+            if !children.is_empty() {
+                nodes.push(Node::PictureChildren(children));
+            }
             continue;
         }
         let mut text = region_texts[i].clone();
@@ -2925,6 +2999,61 @@ pub fn assemble_page(
     (nodes, links)
 }
 
+/// One child of a picture as docling's `ReadingOrderModel._add_child_elements`
+/// writes it under the `PictureItem`: a heading for a `section_header` /
+/// `title` (upstream remaps title to section header), a list item for a
+/// `list_item`, a furniture-layer text for a page header/footer, a caption,
+/// otherwise a text item. `None` for a child that claimed no text.
+fn picture_child_node(region: &Region, text: &str, loc: [u16; 4]) -> Option<Node> {
+    if text.is_empty() {
+        return None;
+    }
+    Some(match region.label {
+        "title" | "section_header" => located(
+            loc,
+            Node::Heading {
+                level: 2,
+                text: md_escape(text),
+            },
+        ),
+        // docling-core's `add_list_item` under a non-list parent opens a
+        // list group per item, so every child item starts its own list.
+        "list_item" => Node::ListItem {
+            ordered: false,
+            number: 0,
+            first_in_list: true,
+            text: md_escape(
+                text.trim_start_matches(['•', '◦', '▪', '·', '*'])
+                    .trim_start(),
+            ),
+            level: 0,
+            marker: Some("·".into()),
+            location: Some(loc),
+            dclx: None,
+            href: None,
+            layer: None,
+        },
+        "page_header" | "page_footer" => Node::PageFurniture {
+            footer: region.label == "page_footer",
+            location: loc,
+            text: md_escape(text),
+        },
+        "caption" => located(
+            loc,
+            Node::Caption {
+                text: md_escape(text),
+                href: None,
+            },
+        ),
+        _ => located(
+            loc,
+            Node::Paragraph {
+                text: md_escape(text),
+            },
+        ),
+    })
+}
+
 /// Rotate one 0–511 location bbox 90° clockwise on the grid (top-left origin):
 /// `(x, y) → (511 - y, x)`.
 fn rot_loc_cw(l: [u16; 4]) -> [u16; 4] {
@@ -2956,7 +3085,7 @@ fn rotate_nodes_to_display(nodes: &mut [Node], rot: u16) {
                 walk(inner, rot_loc, swap_dims);
             }
             Node::Furniture { inner, .. } => walk(inner, rot_loc, swap_dims),
-            Node::Group { children, .. } => {
+            Node::Group { children, .. } | Node::PictureChildren(children) => {
                 for c in children {
                     walk(c, rot_loc, swap_dims);
                 }
@@ -3048,7 +3177,10 @@ fn is_merge_trailer(n: &Node) -> bool {
     is_picture_node(n)
         || matches!(
             n,
-            Node::PageFurniture { .. } | Node::PageInfo { .. } | Node::Table(_)
+            Node::PageFurniture { .. }
+                | Node::PageInfo { .. }
+                | Node::Table(_)
+                | Node::PictureChildren(_)
         )
         || matches!(n, Node::Located { inner, .. } if matches!(inner.as_ref(), Node::Table(_)))
         || as_paragraph(n).is_some_and(looks_like_caption)
@@ -3260,12 +3392,13 @@ mod tests {
 
     /// #165: a picture no longer claims cells at 0.2 intersection-over-self.
     /// A line straddling the figure border (≤80 % contained) becomes an orphan
-    /// region and survives the contained-regulars drop — before the fix its
-    /// cells were silently erased. A line fully inside the picture is still
-    /// re-dropped, matching docling's Markdown (a picture's children never
-    /// reach its serializer's output).
+    /// region and is emitted as page text — before the fix its cells were
+    /// silently erased. A line fully inside the picture is the picture's child
+    /// (docling's `_set_cluster_children`): it survives the containment drop,
+    /// leaves the page's reading order, and is written only under the picture
+    /// in the JSON — never in the Markdown, like docling's picture serializer.
     #[test]
-    fn border_straddling_lines_survive_picture_interior_is_still_dropped() {
+    fn border_straddlers_are_page_text_picture_interior_is_a_picture_child() {
         let pic = Region {
             label: "picture",
             score: 0.9,
@@ -3290,24 +3423,58 @@ mod tests {
             r: 60.0,
             b: 18.0,
         };
+        let cells = vec![straddler, interior];
         let mut regions = vec![pic];
-        super::add_orphan_regions(&mut regions, &[straddler, interior]);
+        super::add_orphan_regions(&mut regions, &cells);
+        super::drop_contained_regulars(&mut regions);
         assert_eq!(
             regions.iter().filter(|r| r.label == "text").count(),
             2,
-            "both unclaimed lines become orphans"
+            "both unclaimed lines become orphans, and a picture swallows neither"
         );
-        super::drop_contained_regulars(&mut regions);
-        let texts: Vec<(f32, f32)> = regions
-            .iter()
-            .filter(|r| r.label == "text")
-            .map(|r| (r.l, r.r))
-            .collect();
+        let parents = super::picture_parents(&regions);
+        let parent_of = |l: f32| {
+            regions
+                .iter()
+                .zip(&parents)
+                .find(|(r, _)| r.label == "text" && r.l == l)
+                .and_then(|(_, p)| *p)
+        };
         assert_eq!(
-            texts,
-            [(90.0, 120.0)],
-            "the straddler is emitted, the fully-contained callout is not"
+            parent_of(10.0),
+            Some(0),
+            "the callout is the picture's child"
         );
+        assert_eq!(parent_of(90.0), None, "the straddler is a page element");
+
+        let page = PdfPage::from_cells(200.0, 200.0, 2.0, cells);
+        let n = regions.len();
+        let (nodes, _) = super::assemble_page(&page, regions, &vec![None; n], &vec![None; n]);
+        let children: Vec<&Node> = nodes
+            .iter()
+            .filter_map(|n| match n {
+                Node::PictureChildren(c) => Some(c),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert!(
+            matches!(children.as_slice(), [Node::Located { inner, .. }]
+                if matches!(inner.as_ref(), Node::Paragraph { text } if text == "in-figure callout")),
+            "{children:?}"
+        );
+        let mut doc = docling_core::DoclingDocument::new("t");
+        doc.nodes = nodes;
+        let md = doc.export_to_markdown();
+        assert!(md.contains("axis label"), "{md}");
+        assert!(!md.contains("in-figure callout"), "{md}");
+        let json = doc.export_to_json_value();
+        let pic = &json["pictures"][0];
+        let child = pic["children"][0]["$ref"].as_str().expect("a child ref");
+        let idx: usize = child.rsplit('/').next().unwrap().parse().unwrap();
+        assert_eq!(json["texts"][idx]["text"], "in-figure callout");
+        assert_eq!(json["texts"][idx]["parent"]["$ref"], "#/pictures/0");
+        assert_eq!(json["texts"][idx]["content_layer"], "body");
     }
 
     /// docling#3906's concern, pinned on our side: a picture detected fully

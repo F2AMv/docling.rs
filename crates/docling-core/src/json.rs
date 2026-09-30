@@ -1219,6 +1219,18 @@ impl Builder {
             }
             Node::Furniture { .. } => None,
             Node::PageFurniture { .. } => None,
+            // A PDF picture's contained text (docling's `_add_child_elements`):
+            // items parented to the picture just written, listed after its
+            // caption in that picture's `children`.
+            Node::PictureChildren(children) => {
+                let pic = self.pictures.len().checked_sub(1)?;
+                let pic_ref = format!("#/pictures/{pic}");
+                let refs = self.walk_into(children, &pic_ref);
+                if let Some(list) = self.pictures[pic]["children"].as_array_mut() {
+                    list.extend(refs);
+                }
+                None
+            }
             // A location wrapper turns into the wrapped item's `prov` entry —
             // but only on pages the PDF paths described with a PageInfo marker
             // (other geometry-bearing backends, e.g. PPTX shapes, keep their
@@ -3143,6 +3155,62 @@ mod tests {
         assert_eq!(v["texts"][1]["parent"]["$ref"], "#/tables/0");
         assert_eq!(refs(&v["tables"][0]["children"]), ["#/texts/1"]);
         assert_eq!(refs(&v["tables"][0]["captions"]), ["#/texts/1"]);
+    }
+
+    /// A PDF picture's contained text (`Node::PictureChildren`) is written as
+    /// docling's `_add_child_elements` writes it: items parented to the
+    /// picture, after its caption in the picture's `children`, never in the
+    /// body; a list item opens its own list group under the picture. The
+    /// Markdown and the chunker's refs are unaffected.
+    #[test]
+    fn picture_children_hang_off_the_picture_after_its_caption() {
+        let mut doc = DoclingDocument::new("t");
+        doc.push(picture("fig", CaptionParent::Item));
+        doc.push(Node::PictureChildren(vec![
+            Node::Heading {
+                level: 2,
+                text: "in-figure title".into(),
+            },
+            Node::Paragraph {
+                text: "axis label".into(),
+            },
+            Node::ListItem {
+                ordered: false,
+                number: 0,
+                first_in_list: true,
+                text: "callout".into(),
+                level: 0,
+                marker: None,
+                location: None,
+                dclx: None,
+                href: None,
+                layer: None,
+            },
+        ]));
+        doc.push(Node::Paragraph {
+            text: "after".into(),
+        });
+        let v: Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        assert_eq!(refs(&v["body"]["children"]), ["#/pictures/0", "#/texts/4"]);
+        assert_eq!(
+            refs(&v["pictures"][0]["children"]),
+            ["#/texts/0", "#/texts/1", "#/texts/2", "#/groups/0"]
+        );
+        assert_eq!(refs(&v["pictures"][0]["captions"]), ["#/texts/0"]);
+        assert_eq!(v["texts"][1]["label"], "section_header");
+        assert_eq!(v["texts"][2]["label"], "text");
+        for t in 1..=2 {
+            assert_eq!(v["texts"][t]["parent"]["$ref"], "#/pictures/0");
+            assert_eq!(v["texts"][t]["content_layer"], "body");
+        }
+        assert_eq!(v["groups"][0]["parent"]["$ref"], "#/pictures/0");
+        assert_eq!(v["texts"][3]["parent"]["$ref"], "#/groups/0");
+        let md = doc.export_to_markdown();
+        assert!(
+            !md.contains("axis label") && !md.contains("callout"),
+            "{md}"
+        );
+        assert!(md.contains("after"), "{md}");
     }
 
     /// A container caption sits beside its item under the item's parent —

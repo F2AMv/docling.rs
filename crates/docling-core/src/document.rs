@@ -300,6 +300,15 @@ pub enum Node {
         location: [u16; 4],
         text: String,
     },
+    /// The text a PDF picture contains, kept the way docling keeps it: every
+    /// regular layout cluster > 80 % inside a picture cluster is that
+    /// `PictureItem`'s child (`LayoutPostprocessor._set_cluster_children`,
+    /// `ReadingOrderModel._add_child_elements`). Emitted right after its
+    /// picture node. The JSON export writes these nodes as items parented to
+    /// that picture, after its caption; docling's Markdown and LaTeX picture
+    /// serializers print only the caption and the image, so every other
+    /// serializer skips it.
+    PictureChildren(Vec<Node>),
     /// A page boundary — docling's implicit page break between pages. The PPTX
     /// backend emits one between consecutive slides. DocLang renders it as
     /// `<page_break/>`; Markdown and JSON omit it (matching docling's default

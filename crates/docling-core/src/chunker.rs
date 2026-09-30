@@ -633,6 +633,27 @@ impl Walker<'_> {
             Node::Located { inner, .. }
             | Node::Prov { inner, .. }
             | Node::Commented { inner, .. } => self.one(inner),
+            // A picture's children are JSON items docling's chunker never
+            // reaches (it iterates without `traverse_pictures`): allocate
+            // their refs only — one text each, plus the list group `json.rs`
+            // opens for each list item (each starts its own list) — so later
+            // refs keep matching the JSON.
+            Node::PictureChildren(children) => {
+                for child in children {
+                    match child {
+                        // A header/footer child is numbered exactly as a
+                        // top-level one is, whatever the JSON does with it.
+                        Node::PageFurniture { .. } => self.one(child),
+                        Node::ListItem { .. } => {
+                            self.alloc.group();
+                            self.alloc.text();
+                        }
+                        _ => {
+                            self.alloc.text();
+                        }
+                    }
+                }
+            }
             // Non-body layers and doclang-only nodes don't reach the chunker
             // (nor the JSON body).
             Node::CommentSection { .. }
@@ -2187,6 +2208,48 @@ mod tests {
             Some(&["Title".into(), "Sec".into()][..])
         );
         assert_eq!(contextualize(&chunks[1]), "Title\nSec\nBody");
+    }
+
+    /// A picture's children are never chunked, but they take `#/texts/N`
+    /// (and list-group) slots in the JSON — the refs after them must still
+    /// point at the right items.
+    #[test]
+    fn picture_children_are_not_chunked_but_keep_refs_aligned() {
+        let doc = doc_with(vec![
+            Node::Picture {
+                caption: None,
+                caption_href: None,
+                image: None,
+                classification: None,
+                caption_parent: crate::CaptionParent::Item,
+            },
+            Node::PictureChildren(vec![
+                Node::Paragraph {
+                    text: "axis label".into(),
+                },
+                Node::ListItem {
+                    ordered: false,
+                    number: 0,
+                    first_in_list: true,
+                    text: "callout".into(),
+                    level: 0,
+                    marker: None,
+                    location: None,
+                    dclx: None,
+                    href: None,
+                    layer: None,
+                },
+            ]),
+            Node::Paragraph {
+                text: "Body".into(),
+            },
+        ]);
+        let chunks = HierarchicalChunker.chunk(&doc);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "Body");
+        let json = doc.export_to_json_value();
+        assert_eq!(json["texts"][2]["text"], "Body");
+        assert_eq!(chunks[0].doc_items[0].self_ref, "#/texts/2");
     }
 
     #[test]

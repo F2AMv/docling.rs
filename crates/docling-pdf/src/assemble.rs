@@ -82,13 +82,27 @@ fn greedy(mut regions: Vec<Region>) -> Vec<Region> {
 /// detector proposes both whole and as its sub-panels (2206's four-thumbnail
 /// Figure 1) collapses to the whole-figure box, exactly like docling.
 pub(crate) fn dedup_pictures(regions: &mut Vec<Region>) {
+    remove_overlapping_specials(regions, |l| l == "picture", 2.0, 0.3);
+}
+
+/// docling's `_remove_overlapping_clusters` for one special bucket (the
+/// regions whose label satisfies `in_bucket`), with that bucket's
+/// `OVERLAP_PARAMS`: picture (2.0, 0.3) — see [`dedup_pictures`] — or wrapper
+/// (2.0, 0.2) for the table bucket in [`resolve`]. Regions outside the bucket
+/// are untouched; a bucket member overlapping nothing is always kept.
+fn remove_overlapping_specials(
+    regions: &mut Vec<Region>,
+    in_bucket: impl Fn(&str) -> bool,
+    area_threshold: f32,
+    conf_threshold: f32,
+) {
     let idx: Vec<usize> = (0..regions.len())
-        .filter(|&i| regions[i].label == "picture")
+        .filter(|&i| in_bucket(regions[i].label))
         .collect();
     if idx.len() < 2 {
         return;
     }
-    // Union-find over the picture subset.
+    // Union-find over the bucket.
     let mut parent: Vec<usize> = (0..idx.len()).collect();
     fn find(parent: &mut [usize], i: usize) -> usize {
         let mut root = i;
@@ -134,8 +148,6 @@ pub(crate) fn dedup_pictures(regions: &mut Vec<Region>) {
         if group.len() < 2 {
             continue;
         }
-        const AREA_THRESHOLD: f32 = 2.0;
-        const CONF_THRESHOLD: f32 = 0.3;
         let area_of = |i: usize| {
             let r = &regions[idx[i]];
             area(r.l, r.t, r.r, r.b).max(f32::EPSILON)
@@ -148,14 +160,14 @@ pub(crate) fn dedup_pictures(regions: &mut Vec<Region>) {
                 }
                 let area_ratio = area_of(cand) / area_of(other);
                 let conf_diff = regions[idx[other]].score - regions[idx[cand]].score;
-                !(area_ratio <= AREA_THRESHOLD && conf_diff > CONF_THRESHOLD)
+                !(area_ratio <= area_threshold && conf_diff > conf_threshold)
             });
             if passes {
                 best = Some(match best {
                     None => cand,
                     Some(cur) => {
                         if area_of(cand) > area_of(cur)
-                            && regions[idx[cur]].score - regions[idx[cand]].score <= CONF_THRESHOLD
+                            && regions[idx[cur]].score - regions[idx[cand]].score <= conf_threshold
                         {
                             cand
                         } else {
@@ -415,13 +427,21 @@ pub fn resolve(regions: Vec<Region>) -> Vec<Region> {
     // (`TABLE_TYPES` vs `CONTAINER_TYPES`, docling#4064): a form drawn around a
     // table no longer competes with it for survival — the table nests inside
     // the container instead (`order_with_containers`).
-    let tables = greedy(
+    let mut tables = greedy(
         regions
             .iter()
             .filter(|r| is_table_like(r.label))
             .cloned()
             .collect(),
     );
+    // `greedy` only drops a table mostly inside a *more* confident one, so a
+    // low-score whole-page table proposed over the column tables it contains
+    // (a two-column glossary page: 0.53 over 0.71/0.67/0.66) survived next to them and every
+    // cell was emitted twice. docling's `_remove_overlapping_clusters(tables,
+    // "wrapper")` groups tables whose boxes overlap (IoU > 0.8, or either one
+    // > 80 % inside the other) and keeps one per group: run it on what
+    // `greedy` leaves, like `merge_overlapping_regulars` does for regulars.
+    remove_overlapping_specials(&mut tables, |_| true, 2.0, 0.2);
     let containers = greedy(
         regions
             .iter()
@@ -911,6 +931,19 @@ pub fn recover_text_panels(regions: &mut Vec<Region>, cells: &[TextCell]) {
             }
         });
     }
+    // docling's "Remove regular clusters that are included in wrappers" (a
+    // regular > 80 % inside a table is absorbed by it) already ran as
+    // [`drop_contained_regulars`], but before this demotion created new
+    // regulars. Apply it to them too: a panel that coincides with a table (a
+    // dense data table detected as picture 0.80 and table 0.62 on one box;
+    // `_handle_cross_type_overlaps` keeps both once the picture is ≥ 0.1 more
+    // confident) rebuilds the table's words as a paragraph the grid already
+    // renders. A panel inside another picture is left as it was.
+    demoted_paras.retain(|p| {
+        let pa = area(p.l, p.t, p.r, p.b).max(1.0);
+        !out.iter()
+            .any(|s| is_table_like(s.label) && inter(p, s.l, s.t, s.r, s.b) / pa > 0.8)
+    });
     out.extend(demoted_paras);
     *regions = out;
 }
@@ -3825,6 +3858,61 @@ mod tests {
         let code_a = region("code", 0.9, 78.0, 100.0, 300.0, 140.0);
         let code_b = region("code", 0.9, 78.0, 300.0, 300.0, 360.0); // far below, no overlap
         assert_eq!(super::resolve(vec![code_a, code_b]).len(), 2);
+    }
+
+    /// A two-column glossary page came out as three column
+    /// tables *and* one low-score whole-page table over them. docling's wrapper
+    /// `_remove_overlapping_clusters` keeps one table per overlapping group
+    /// (here the whole-page one: > 2× every rival's area and ≤ 0.2 less
+    /// confident than the running best); `greedy` alone kept all four and
+    /// emitted every cell twice.
+    #[test]
+    fn resolve_keeps_one_table_per_nested_group() {
+        let kept = super::resolve(vec![
+            region("table", 0.71, 26.0, 203.0, 183.0, 558.0),
+            region("table", 0.67, 26.0, 55.0, 183.0, 196.0),
+            region("table", 0.66, 196.0, 56.0, 354.0, 561.0),
+            region("table", 0.53, 25.0, 53.0, 354.0, 561.0),
+        ]);
+        assert_eq!(kept.len(), 1, "one survivor per overlapping group");
+        assert_eq!((kept[0].l, kept[0].b), (25.0, 561.0));
+        // Side-by-side tables that don't overlap stay separate.
+        let kept = super::resolve(vec![
+            region("table", 0.9, 26.0, 55.0, 183.0, 558.0),
+            region("table", 0.9, 196.0, 56.0, 354.0, 561.0),
+        ]);
+        assert_eq!(kept.len(), 2);
+    }
+
+    /// A dense data table detected as both picture (0.80) and table (0.62) on one box.
+    /// The picture is ≥ 0.1 more confident, so `_handle_cross_type_overlaps`
+    /// keeps both, and the dense table text passed the text-panel gates: the
+    /// demoted paragraph repeated every cell the table grid renders. A
+    /// paragraph > 80 % inside a surviving table is the table's child and is
+    /// not emitted; a panel with no table under it still demotes.
+    #[test]
+    fn text_panel_over_a_table_does_not_repeat_its_cells() {
+        let lines = |t0: f32| -> Vec<TextCell> {
+            (0..4)
+                .map(|i| {
+                    let t = t0 + 10.0 * i as f32;
+                    cell("1 2 3 4 5 6 7 8 9 10 11 12", 5.0, t, 95.0, t + 8.0)
+                })
+                .collect()
+        };
+        let mut cells = lines(0.0);
+        cells.extend(lines(200.0));
+        let mut regions = vec![
+            region("picture", 0.80, 0.0, 0.0, 100.0, 45.0),
+            region("table", 0.62, 0.0, 0.0, 100.0, 45.0),
+            region("picture", 0.80, 0.0, 200.0, 100.0, 245.0),
+        ];
+        super::recover_text_panels(&mut regions, &cells);
+        assert_eq!(
+            regions.iter().map(|r| r.label).collect::<Vec<_>>(),
+            ["table", "text"]
+        );
+        assert_eq!(regions[1].t, 200.0, "the table-free panel still demotes");
     }
 
     #[test]

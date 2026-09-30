@@ -633,6 +633,12 @@ impl Walker<'_> {
             Node::Located { inner, .. }
             | Node::Prov { inner, .. }
             | Node::Commented { inner, .. } => self.one(inner),
+            // A PDF page header/footer is a furniture-layer JSON text item:
+            // never chunked (docling's chunker reads the body layer), but it
+            // takes a `#/texts/N` number, so later refs keep matching the JSON.
+            Node::PageFurniture { .. } => {
+                self.alloc.text();
+            }
             // A picture's children are JSON items docling's chunker never
             // reaches (it iterates without `traverse_pictures`): allocate
             // their refs only — one text each, plus the list group `json.rs`
@@ -658,7 +664,6 @@ impl Walker<'_> {
             // (nor the JSON body).
             Node::CommentSection { .. }
             | Node::Furniture { .. }
-            | Node::PageFurniture { .. }
             | Node::PageBreak
             | Node::PageInfo { .. }
             | Node::DoclangOnly(_) => {}
@@ -2208,6 +2213,31 @@ mod tests {
             Some(&["Title".into(), "Sec".into()][..])
         );
         assert_eq!(contextualize(&chunks[1]), "Title\nSec\nBody");
+    }
+
+    /// A page footer is a JSON text item (furniture layer) the chunker never
+    /// chunks; the refs of the items after it still match the JSON.
+    #[test]
+    fn page_furniture_keeps_refs_aligned_with_json() {
+        let doc = doc_with(vec![
+            Node::Paragraph {
+                text: "Before".into(),
+            },
+            Node::PageFurniture {
+                footer: true,
+                location: [0, 490, 100, 512],
+                text: "1.10.2".into(),
+            },
+            Node::Paragraph {
+                text: "After".into(),
+            },
+        ]);
+        let chunks = HierarchicalChunker.chunk(&doc);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[1].text, "After");
+        let json: serde_json::Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        assert_eq!(json["texts"][2]["text"], "After");
+        assert_eq!(chunks[1].doc_items[0].self_ref, "#/texts/2");
     }
 
     /// A picture's children are never chunked, but they take `#/texts/N`

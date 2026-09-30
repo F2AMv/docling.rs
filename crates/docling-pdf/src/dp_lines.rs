@@ -20,9 +20,9 @@ const MERGE_WITH_SPACE: f64 = 0.33; // line_space_width_factor_for_merge_with_sp
 // create_word_cells: words contract under their own, tighter factors — the
 // adjacency gate is word_space_width_factor_for_merge (0.33) and the space
 // threshold is twice that (2.0 * 0.33), which the 0.33 gate can never exceed,
-// so a word cell never contains an inserted space. Space glyphs are pure
-// word-boundary barriers: they are dropped from the word run up front, so a
-// thin CJK space's neighbors may still contract into one spaceless word.
+// so a word cell never contains an inserted space. Space glyphs are hard
+// word-boundary barriers during the contraction (`applicable`'s
+// `block_spaces`) and are erased only afterwards, as docling-parse does.
 const WORD_MERGE: f64 = 0.33; // word_space_width_factor_for_merge
 const WORD_MERGE_WITH_SPACE: f64 = 2.0 * WORD_MERGE;
 const H_TOL: f64 = 1.0; // horizontal_cell_tolerance (ligature eps_d1 relaxation)
@@ -444,16 +444,15 @@ pub(crate) fn line_and_word_cells(
             b: page_h - bot,
         }
     };
-    // Word run: the space glyphs act as pure word-boundary barriers and never
-    // survive into a word cell — with them out of the stream, two glyphs that
-    // *overlap* across a thin CJK space (`군`…`감`, 1.5 pt apart under a 2.5 pt
-    // gate) contract into one spaceless word (`1군감염병`), while a full Latin
-    // space's gap (~0.5 em) exceeds the 0.33 gate and keeps words apart.
-    let mut word_run: Vec<Cell> = built
-        .iter()
-        .filter(|c| !is_all_space(&c.text))
-        .cloned()
-        .collect();
+    // Word run: docling-parse's `create_word_cells` order — copy the char
+    // cells, contract (`sanitize_bbox`), *then* erase the spaces. The space
+    // glyphs stay in the stream during the contraction, where `applicable`'s
+    // `block_spaces` makes each one a hard word boundary; they are dropped
+    // afterwards by the blank filter below. Filtering them out up front let
+    // the 0.33 gate alone decide word breaks, which glues tight-set Latin
+    // (`MODE` + `to`: 1.8 pt apart under a 2.0 pt gate → `MODEto`) and the
+    // thin-spaced Korean docling-parse ≥ 7 keeps apart (`1군` `감염병`).
+    let mut word_run: Vec<Cell> = built.clone();
     let mut cells = built;
     contract(&mut cells, euclidean, LINE_FACTORS);
     let lines: Vec<TextCell> = cells.into_iter().map(to_text_cell).collect();
@@ -549,4 +548,46 @@ fn is_punct_or_space(s: &str) -> bool {
 fn is_ligature(s: &str) -> bool {
     matches!(s, "ff" | "fi" | "fl" | "ffi" | "ffl")
         || s.chars().any(|c| (0xFB00..=0xFB06).contains(&(c as u32)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn glyph(ch: char, l: f32, r: f32) -> Glyph {
+        Glyph {
+            ch,
+            l,
+            b: 100.0,
+            r,
+            t: 110.0,
+            ll: l,
+            lb: 98.0,
+            lr: r,
+            lt: 110.0,
+            font: 0,
+        }
+    }
+
+    /// Tight-set Latin (a table cell in a born-digital manual): the gap between
+    /// `MODE` and `to` (1.84 pt) is under the 0.33 × average-width word gate (2.0 pt), so
+    /// only the space glyph between them keeps the words apart. docling-parse
+    /// erases spaces after the word contraction, not before.
+    #[test]
+    fn space_glyph_separates_tight_words() {
+        let glyphs = [
+            glyph('M', 137.66, 143.74),
+            glyph('O', 143.74, 149.82),
+            glyph('D', 149.82, 155.90),
+            glyph('E', 155.90, 161.98),
+            glyph(' ', 161.84, 164.09),
+            glyph('t', 163.82, 166.60),
+            glyph('o', 166.60, 171.60),
+        ];
+        let (lines, words) = line_and_word_cells(&glyphs, 792.0, true);
+        let words: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(words, ["MODE", "to"]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "MODE to");
+    }
 }

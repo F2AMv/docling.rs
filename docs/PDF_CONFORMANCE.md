@@ -30,9 +30,9 @@ are no longer scored.)
 | base14_fonts_rot90 / _rot180 / _rot270 | **exact** | — (`/Rotate` display-frame normalization, docling#4008) |
 | amt_handbook_sample | 2 *(ws-ok)* | docling's spurious fraction double space — ours is more faithful |
 | code_and_formula | **exact** | — (flat legacy code, line-preserving `pretty` in strict) |
-| normal_4pages | 16 | two-column line interleave + section-1 numeral claim |
+| normal_4pages | 28 | two-column line interleave + section-1 numeral claim; 12 of the lines are the Korean table's word spacing, where the committed groundtruth is an older docling's (`1군감염병`) and docling 2.129 writes `1군 감염병` as we now do |
 | 2305.03393v1 | 18 | author-block cluster split + in-figure label clusters (model-level) |
-| table_mislabeled_as_picture | 48 | layout over-detects tables (survey rendered as tables) |
+| table_mislabeled_as_picture | 66 | layout over-detects tables (survey rendered as tables); 18 of the lines are one table's word spacing, where the committed groundtruth is an older docling's (`Refugees,asylum seekers,or`) and docling 2.129 writes `Refugees, asylum seekers, or` as we now do |
 | 2203.01017v2 | 51 | reference-accent spacing + author-block splits (in-picture table recovered: same grid as docling, different OCR engine noise) |
 | 2206.01062 | 56 | author-block cluster splits (model-borderline) + one int8-borderline header rowspan; 4 of the lines are the #424 same-row author order, which docling 2.127 produces too — the committed groundtruth is an older docling's |
 | right_to_left_03 | 56 | RTL bidi + wrapper (form) children order |
@@ -73,6 +73,27 @@ the merged Dunlop ad block now sits at its picture's position in the reading
 order; the other 96 snapshots are byte-identical. Groundtruth: unchanged — 9/17 strict, 10/17
 whitespace-normalized, every per-file diff count as in the table above (the
 groundtruth PDFs are digital pages, which this pass never touches).
+
+### One table per overlapping group, and no text panel over a table
+
+Two paths emitted a table's content twice. `resolve` ran only `greedy` on
+the table group, which drops a box mostly inside a *more* confident one, so a
+low-score table proposed over the column tables it contains (a two-column
+glossary page: 0.53 over 0.71 / 0.67 / 0.66) survived next to them. docling
+also runs `_remove_overlapping_clusters(tables, "wrapper")`: tables whose
+boxes overlap (IoU > 0.8, or either > 80 % inside the other) form a group and
+one survives. `dedup_pictures` already ported that selection for pictures; it
+is now `remove_overlapping_specials` and runs on the tables `greedy` keeps,
+with the wrapper parameters (`area_threshold` 2.0, `conf_threshold` 0.2).
+Separately, `recover_text_panels` demotes a picture to paragraphs after
+`drop_contained_regulars` has run, so a picture detected on the same box as a
+table (picture 0.80, table 0.62: `_handle_cross_type_overlaps` keeps both
+once the picture is ≥ 0.1 more confident) rebuilt the table's words as a
+paragraph; demoted paragraphs > 80 % inside a surviving table are now
+dropped too. On a 1,962-page born-digital manual 19 pages repeated content;
+12 are clean now, and the rest repeat UI-screenshot filler glyphs, not
+content. Snapshots: 97/97 byte-identical. Groundtruth: unchanged, 9/17 strict,
+10/17 whitespace-normalized, every per-file count as in the table above.
 
 ### docling-core 2.96 table headers: PDF baselines refreshed
 
@@ -324,12 +345,21 @@ table_mislabeled 76→72 — −48 lines, nothing worse.
 **Word cells are docling-parse's own `create_word_cells`** — a second
 contraction over the shared char cells under the word factors
 (`word_space_width_factor_for_merge` 0.33 for the adjacency gate, 2 × 0.33
-for the never-firing space threshold), with space glyphs acting as pure
-word-boundary barriers dropped from the run up front. The words TableFormer
-matches against therefore tokenize exactly as docling's: a thin CJK space
-whose neighbors overlap contracts into one spaceless word (docling's
-`1군감염병`, where splitting at every line-space manufactured `1군 감염병`),
-while a full Latin space's gap exceeds the gate and keeps words apart.
+for the never-firing space threshold). Space glyphs stay in the run during
+the contraction as hard word-boundary barriers and are erased afterwards,
+docling-parse's own order (`copy_cells` → `sanitize_bbox` → `erase_spaces`).
+Dropping them up front (the earlier port) left the 0.33 gate alone to split
+words, which glued tight-set Latin in table cells (a 1,962-page born-digital
+manual: `MODE` + `to` 1.8 pt apart under a 2.0 pt gate → `MODEto`, 2,231
+glued tokens in all) and joined thin-spaced Korean that docling 2.129 keeps
+apart (`1군 감염병`; the older groundtruth has `1군감염병`). Four fixtures moved,
+every changed line toward live docling 2.129 (`docling_convert.py`, default
+int8 models; diff lines v1.74.1 → now): normal_4pages 22 → 10,
+right_to_left_03 12 → 8, text_document_03.odt 20 → 18, and
+table_mislabeled_as_picture 111 → 111 (its moved lines now match docling's
+text; the table's first column differs for another reason). Against the
+committed groundtruth, which predates docling-parse 7, normal_4pages goes
+16 → 28 and table_mislabeled_as_picture 48 → 66; four snapshots refreshed.
 Table-heavy fixtures moved wholesale: redp5110 164→73 (the TOC "OTSL
 model-level blocker" was largely tokenization), table_mislabeled 72→54,
 normal_4pages 32→20, everything else byte-identical.
@@ -642,6 +672,20 @@ to ONNX in `tableformer.rs`) on a cv2-exact preprocessed crop (`resample.rs`); t
 structure + matched cell text reproduce docling's padded GitHub tables (2305-pg9
 is cell-for-cell exact).
 
+**Runaway rows (a deliberate deviation).** On dense tables under a multi-level
+header (a 10 × 28 adjustment grid below three header rows) the decoder emits
+`ched ched`, then `lcel` until `MAX_STEPS`, and never a row break. docling
+2.129 (docling-ibm-models 4.0.3) decodes the same 1,025-tag sequence and ends
+at a 1 × 1 table only because `html_to_otsl` knows colspans 2–20 and drops the
+1022-wide span, after which its matcher loses 53 % of the words; the port kept
+the span and emitted 1 × 1023 cells repeating the header (3 of 272 words
+kept). `BboxBook` now stops once a row reaches `MAX_ROW_TAGS` (256; a 448-px
+input cannot resolve that many columns, and real tables stay far below it) and
+the structure is rejected, so the region takes the geometric table path: 12 ×
+17 with all 272 words, and 2.8 s of decoding instead of 14.3 s. A long table
+that fills `MAX_STEPS` with ordinary rows is unaffected. Snapshots 97/97
+byte-identical; groundtruth unchanged.
+
 **Heading levels (#302, opt-in).** With `--heading-hierarchy` (off by default —
 everything in this document is measured with it off), a post-assembly stage
 ports docling's `HeadingHierarchyModel`: section-header levels are assigned
@@ -740,8 +784,8 @@ signed horizontal gap.
 
 **Word cells** come from a second contraction over the same char cells
 (`create_word_cells`, see the word-cell section above): the word factors
-(adjacency gate 0.33, space threshold 2 × 0.33) with space glyphs dropped up
-front as pure word-boundary barriers — verified against the installed
+(adjacency gate 0.33, space threshold 2 × 0.33) with space glyphs as hard
+word-boundary barriers erased after the contraction — verified against the installed
 docling-parse oracle (redp5110 pages byte-exact). These are the per-word
 tokens TableFormer matches against table-grid cells, replacing pdfium's word
 cells (roadmap item 6). **Code cells** come from the parser too,

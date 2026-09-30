@@ -11,7 +11,7 @@ use crate::pdfium_backend::TextCell;
 // owned-value KV-cache fast path.
 use crate::tf_core::{
     argmax, build_table_cells, correct, merge_spans, preprocess_input, BboxBook, TableCell, END,
-    MAX_STEPS, START, UCEL,
+    MAX_ROW_TAGS, MAX_STEPS, START, UCEL,
 };
 use image::RgbImage;
 use ort::session::Session;
@@ -632,6 +632,13 @@ impl TableFormer {
         mut book: BboxBook,
         eo: &DynValue,
     ) -> Result<Vec<TableCell>, String> {
+        if book.runaway() {
+            docling_core::debug_log!(
+                "docling-pdf: tableformer: no row break in {MAX_ROW_TAGS} tags; \
+                 geometric table fallback"
+            );
+            return Ok(Vec::new());
+        }
         if book.n == 0 {
             return Ok(Vec::new());
         }

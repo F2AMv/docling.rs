@@ -1552,8 +1552,9 @@ impl Worker {
         // containment) survive as text. Emitting *everything* here used to
         // splice a chart's OCR'd axis ticks into the body text right next to
         // the image chunk (#200) — so the orphan pass places the recognized
-        // lines, then the same containment drop that handled the first wave
-        // re-runs to swallow the in-picture ones.
+        // lines, the containment drop re-runs for the in-table ones, and
+        // `assemble_page` nests the in-picture ones under their picture
+        // (JSON-only children, `assemble::picture_parents`).
         if ocred && (!pic_cells.is_empty() || !det_cells.is_empty()) {
             // Pictures (and wrappers) no longer count as claimers (#165), so
             // the plain orphan pass places the recognized lines directly —
@@ -1772,8 +1773,16 @@ impl Worker {
             }
         }
         // Score the final region set (docling assigns layout_score over the
-        // postprocessed clusters — the same set assemble_page consumes).
-        let conf = quality::page_confidence(parse, &regions, &ocr_confs);
+        // postprocessed clusters — the page elements assemble_page emits,
+        // which leave out the regulars nested in a picture as its children).
+        let parents = assemble::picture_parents(&regions);
+        let elements: Vec<layout::Region> = regions
+            .iter()
+            .zip(&parents)
+            .filter(|(_, p)| p.is_none())
+            .map(|(r, _)| r.clone())
+            .collect();
+        let conf = quality::page_confidence(parse, &elements, &ocr_confs);
         let (nodes, links) = timing::timed("assemble_page", || {
             assemble::assemble_page(page, regions, &table_rows, &enrich_out)
         });

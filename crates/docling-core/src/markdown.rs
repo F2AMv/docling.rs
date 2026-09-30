@@ -708,6 +708,9 @@ fn render_one(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
         // Markdown by default, mirroring docling.
         Node::Furniture { .. } => {}
         Node::PageFurniture { .. } => {}
+        // A picture's contained text is JSON-only: docling's Markdown picture
+        // serializer prints the caption and the image, never the children.
+        Node::PictureChildren(_) => {}
         // A comment lives in the notes layer — omitted like other furniture;
         // the annotation on a body item is JSON-only, so render the item.
         Node::CommentSection { .. } => {}

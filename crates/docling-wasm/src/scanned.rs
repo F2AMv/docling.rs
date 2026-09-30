@@ -436,13 +436,17 @@ pub async fn convert_scanned_image(
     conv.finish(name, to, images)
 }
 
-/// Does any node carry text? Pictures, page breaks and their `Located`
-/// wrappers do not; everything else (paragraphs, headings, tables, …) does.
+/// Does any node carry text? Pictures (and the JSON-only text nested under
+/// them), page breaks and their `Located` wrappers do not; everything else
+/// (paragraphs, headings, tables, …) does.
 fn nodes_have_text(nodes: &[docling_core::Node]) -> bool {
     use docling_core::Node;
     nodes.iter().any(|n| match n {
         Node::Located { inner, .. } => nodes_have_text(std::slice::from_ref(inner)),
-        Node::Picture { .. } | Node::PageBreak | Node::PageInfo { .. } => false,
+        Node::Picture { .. }
+        | Node::PictureChildren(_)
+        | Node::PageBreak
+        | Node::PageInfo { .. } => false,
         _ => true,
     })
 }

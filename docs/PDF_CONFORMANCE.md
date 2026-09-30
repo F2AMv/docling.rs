@@ -74,6 +74,27 @@ order; the other 96 snapshots are byte-identical. Groundtruth: unchanged — 9/1
 whitespace-normalized, every per-file diff count as in the table above (the
 groundtruth PDFs are digital pages, which this pass never touches).
 
+### One table per overlapping group, and no text panel over a table
+
+Two paths emitted a table's content twice. `resolve` ran only `greedy` on
+the table group, which drops a box mostly inside a *more* confident one, so a
+low-score table proposed over the column tables it contains (a two-column
+glossary page: 0.53 over 0.71 / 0.67 / 0.66) survived next to them. docling
+also runs `_remove_overlapping_clusters(tables, "wrapper")`: tables whose
+boxes overlap (IoU > 0.8, or either > 80 % inside the other) form a group and
+one survives. `dedup_pictures` already ported that selection for pictures; it
+is now `remove_overlapping_specials` and runs on the tables `greedy` keeps,
+with the wrapper parameters (`area_threshold` 2.0, `conf_threshold` 0.2).
+Separately, `recover_text_panels` demotes a picture to paragraphs after
+`drop_contained_regulars` has run, so a picture detected on the same box as a
+table (picture 0.80, table 0.62: `_handle_cross_type_overlaps` keeps both
+once the picture is ≥ 0.1 more confident) rebuilt the table's words as a
+paragraph; demoted paragraphs > 80 % inside a surviving table are now
+dropped too. On a 1,962-page born-digital manual 19 pages repeated content;
+12 are clean now, and the rest repeat UI-screenshot filler glyphs, not
+content. Snapshots: 97/97 byte-identical. Groundtruth: unchanged, 9/17 strict,
+10/17 whitespace-normalized, every per-file count as in the table above.
+
 ### docling-core 2.96 table headers: PDF baselines refreshed
 
 The table-header rule ported in #362 (docling-core#723/#756 — the header block

@@ -652,6 +652,20 @@ to ONNX in `tableformer.rs`) on a cv2-exact preprocessed crop (`resample.rs`); t
 structure + matched cell text reproduce docling's padded GitHub tables (2305-pg9
 is cell-for-cell exact).
 
+**Runaway rows (a deliberate deviation).** On dense tables under a multi-level
+header (a 10 × 28 adjustment grid below three header rows) the decoder emits
+`ched ched`, then `lcel` until `MAX_STEPS`, and never a row break. docling
+2.129 (docling-ibm-models 4.0.3) decodes the same 1,025-tag sequence and ends
+at a 1 × 1 table only because `html_to_otsl` knows colspans 2–20 and drops the
+1022-wide span, after which its matcher loses 53 % of the words; the port kept
+the span and emitted 1 × 1023 cells repeating the header (3 of 272 words
+kept). `BboxBook` now stops once a row reaches `MAX_ROW_TAGS` (256; a 448-px
+input cannot resolve that many columns, and real tables stay far below it) and
+the structure is rejected, so the region takes the geometric table path: 12 ×
+17 with all 272 words, and 2.8 s of decoding instead of 14.3 s. A long table
+that fills `MAX_STEPS` with ordinary rows is unaffected. Snapshots 97/97
+byte-identical; groundtruth unchanged.
+
 **Heading levels (#302, opt-in).** With `--heading-hierarchy` (off by default —
 everything in this document is measured with it off), a post-assembly stage
 ports docling's `HeadingHierarchyModel`: section-header levels are assigned

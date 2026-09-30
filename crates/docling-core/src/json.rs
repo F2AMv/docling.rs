@@ -1218,7 +1218,27 @@ impl Builder {
                 Some(item)
             }
             Node::Furniture { .. } => None,
-            Node::PageFurniture { .. } => None,
+            // PDF page headers and footers: docling writes them as body-parented
+            // `page_header`/`page_footer` text items on the furniture layer, so a
+            // JSON consumer can read running headers (printed page ids, dates).
+            Node::PageFurniture {
+                footer,
+                location,
+                text,
+            } => {
+                if self.cur_page > 0 {
+                    self.pending_loc = Some(*location);
+                }
+                let label = if *footer {
+                    "page_footer"
+                } else {
+                    "page_header"
+                };
+                let item = self.add_text(label, text, parent, json!({}));
+                self.pending_loc = None;
+                self.set_layer(&item, "furniture");
+                Some(item)
+            }
             // A location wrapper turns into the wrapped item's `prov` entry —
             // but only on pages the PDF paths described with a PageInfo marker
             // (other geometry-bearing backends, e.g. PPTX shapes, keep their
@@ -2320,6 +2340,43 @@ mod tests {
         let v: Value = serde_json::from_str(&plain.export_to_json()).unwrap();
         assert_eq!(v["pages"], serde_json::json!({}));
         assert_eq!(v["texts"][0]["prov"], serde_json::json!([]));
+    }
+
+    /// PDF page headers/footers reach the JSON as docling writes them:
+    /// body-parented text items on the furniture layer, with their box.
+    #[test]
+    fn page_furniture_becomes_furniture_layer_text() {
+        let mut doc = DoclingDocument::new("t");
+        doc.push(Node::PageInfo {
+            page_no: 1,
+            width: 512.0,
+            height: 512.0,
+        });
+        doc.push(Node::PageFurniture {
+            footer: false,
+            location: [10, 0, 100, 20],
+            text: "Chapter 1".into(),
+        });
+        doc.push(Node::Paragraph {
+            text: "body".into(),
+        });
+        doc.push(Node::PageFurniture {
+            footer: true,
+            location: [400, 490, 500, 512],
+            text: "1.10.2".into(),
+        });
+        let v: Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        let texts = v["texts"].as_array().unwrap();
+        assert_eq!(texts.len(), 3);
+        assert_eq!(texts[0]["label"], "page_header");
+        assert_eq!(texts[0]["content_layer"], "furniture");
+        assert_eq!(texts[0]["parent"]["$ref"], "#/body");
+        assert_eq!(texts[0]["prov"][0]["bbox"]["l"], 10.0);
+        assert_eq!(texts[1]["content_layer"], "body");
+        assert_eq!(texts[1]["prov"], serde_json::json!([]));
+        assert_eq!(texts[2]["label"], "page_footer");
+        assert_eq!(texts[2]["text"], "1.10.2");
+        assert_eq!(texts[2]["content_layer"], "furniture");
     }
 
     #[test]

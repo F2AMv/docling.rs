@@ -30,9 +30,9 @@ are no longer scored.)
 | base14_fonts_rot90 / _rot180 / _rot270 | **exact** | — (`/Rotate` display-frame normalization, docling#4008) |
 | amt_handbook_sample | 2 *(ws-ok)* | docling's spurious fraction double space — ours is more faithful |
 | code_and_formula | **exact** | — (flat legacy code, line-preserving `pretty` in strict) |
-| normal_4pages | 16 | two-column line interleave + section-1 numeral claim |
+| normal_4pages | 28 | two-column line interleave + section-1 numeral claim; 12 of the lines are the Korean table's word spacing, where the committed groundtruth is an older docling's (`1군감염병`) and docling 2.129 writes `1군 감염병` as we now do |
 | 2305.03393v1 | 18 | author-block cluster split + in-figure label clusters (model-level) |
-| table_mislabeled_as_picture | 48 | layout over-detects tables (survey rendered as tables) |
+| table_mislabeled_as_picture | 66 | layout over-detects tables (survey rendered as tables); 18 of the lines are one table's word spacing, where the committed groundtruth is an older docling's (`Refugees,asylum seekers,or`) and docling 2.129 writes `Refugees, asylum seekers, or` as we now do |
 | 2203.01017v2 | 51 | reference-accent spacing + author-block splits (in-picture table recovered: same grid as docling, different OCR engine noise) |
 | 2206.01062 | 56 | author-block cluster splits (model-borderline) + one int8-borderline header rowspan; 4 of the lines are the #424 same-row author order, which docling 2.127 produces too — the committed groundtruth is an older docling's |
 | right_to_left_03 | 58 | RTL bidi + wrapper (form) children order |
@@ -304,12 +304,21 @@ table_mislabeled 76→72 — −48 lines, nothing worse.
 **Word cells are docling-parse's own `create_word_cells`** — a second
 contraction over the shared char cells under the word factors
 (`word_space_width_factor_for_merge` 0.33 for the adjacency gate, 2 × 0.33
-for the never-firing space threshold), with space glyphs acting as pure
-word-boundary barriers dropped from the run up front. The words TableFormer
-matches against therefore tokenize exactly as docling's: a thin CJK space
-whose neighbors overlap contracts into one spaceless word (docling's
-`1군감염병`, where splitting at every line-space manufactured `1군 감염병`),
-while a full Latin space's gap exceeds the gate and keeps words apart.
+for the never-firing space threshold). Space glyphs stay in the run during
+the contraction as hard word-boundary barriers and are erased afterwards,
+docling-parse's own order (`copy_cells` → `sanitize_bbox` → `erase_spaces`).
+Dropping them up front (the earlier port) left the 0.33 gate alone to split
+words, which glued tight-set Latin in table cells (a 1,962-page born-digital
+manual: `MODE` + `to` 1.8 pt apart under a 2.0 pt gate → `MODEto`, 2,231
+glued tokens in all) and joined thin-spaced Korean that docling 2.129 keeps
+apart (`1군 감염병`; the older groundtruth has `1군감염병`). Four fixtures moved,
+every changed line toward live docling 2.129 (`docling_convert.py`, default
+int8 models; diff lines v1.74.1 → now): normal_4pages 22 → 10,
+right_to_left_03 12 → 8, text_document_03.odt 20 → 18, and
+table_mislabeled_as_picture 111 → 111 (its moved lines now match docling's
+text; the table's first column differs for another reason). Against the
+committed groundtruth, which predates docling-parse 7, normal_4pages goes
+16 → 28 and table_mislabeled_as_picture 48 → 66; four snapshots refreshed.
 Table-heavy fixtures moved wholesale: redp5110 164→73 (the TOC "OTSL
 model-level blocker" was largely tokenization), table_mislabeled 72→54,
 normal_4pages 32→20, everything else byte-identical.
@@ -720,8 +729,8 @@ signed horizontal gap.
 
 **Word cells** come from a second contraction over the same char cells
 (`create_word_cells`, see the word-cell section above): the word factors
-(adjacency gate 0.33, space threshold 2 × 0.33) with space glyphs dropped up
-front as pure word-boundary barriers — verified against the installed
+(adjacency gate 0.33, space threshold 2 × 0.33) with space glyphs as hard
+word-boundary barriers erased after the contraction — verified against the installed
 docling-parse oracle (redp5110 pages byte-exact). These are the per-word
 tokens TableFormer matches against table-grid cells, replacing pdfium's word
 cells (roadmap item 6). **Code cells** come from the parser too,
